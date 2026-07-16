@@ -1,0 +1,86 @@
+const express = require('express');
+const healthRoute = require('./health.routes');
+const authRoute = require('./auth.routes');
+const pasienRoute = require('./pasien.routes');
+const icd10Route = require('./icd10.routes');
+const icd9Route = require('./icd9.routes');
+const perusahaanRoute = require('./perusahaan.routes');
+const klinikRoute = require('./klinik.routes');
+const kunjunganRoute = require('./kunjungan.routes');
+const screeningRoute = require('./screening.routes');
+const rawatJalanRoute = require('./rawatJalan.routes');
+const masterRoute = require('./master.routes');
+const farmasiRoute = require('./farmasi.routes');
+const laboratoriumRoute = require('./laboratorium.routes');
+const kasirRoute = require('./kasir.route');
+const ukmRoute = require('./ukm.route');
+const router = express.Router();
+
+const defaultRoutes = [
+  {
+    path: '/health',
+    route: healthRoute,
+  },
+  {
+    path: '/auth',
+    route: authRoute,
+  },
+  {
+    path: '/pasien',
+    route: pasienRoute,
+  },
+  {
+    path: '/icd10',
+    route: icd10Route,
+  },
+  {
+    path: '/icd9',
+    route: icd9Route,
+  },
+  {
+    path: '/perusahaan',
+    route: perusahaanRoute,
+  },
+  {
+    path: '/klinik',
+    route: klinikRoute,
+  },
+  {
+    path: '/kunjungan',
+    route: kunjunganRoute,
+  },
+  {
+    path: '/screening',
+    route: screeningRoute,
+  },
+  {
+    path: '/rawat-jalan',
+    route: rawatJalanRoute,
+  },
+  {
+    path: '/master',
+    route: masterRoute,
+  },
+  {
+    path: '/farmasi',
+    route: farmasiRoute,
+  },
+  {
+    path: '/laboratorium',
+    route: laboratoriumRoute,
+  },
+  {
+    path: '/kasir',
+    route: kasirRoute,
+  },
+  {
+    path: '/ukm',
+    route: ukmRoute,
+  }
+];
+
+defaultRoutes.forEach((route) => {
+  router.use(route.path, route.route);
+});
+
+module.exports = router;
