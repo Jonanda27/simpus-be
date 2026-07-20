@@ -101,6 +101,20 @@ const selesaikanPemeriksaan = async (req, res, next) => {
   }
 };
 
+const tundaPemeriksaan = async (req, res, next) => {
+  try {
+    const { kunjunganId } = req.params;
+    const data = await rawatJalanService.tundaPemeriksaan(kunjunganId);
+    res.status(200).json({
+      success: true,
+      message: 'Pemeriksaan ditunda dan dikembalikan ke antrean',
+      data,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 const getRekamMedis = async (req, res, next) => {
   try {
     const { kunjunganId } = req.params;
@@ -154,6 +168,27 @@ const simpanRujukan = async (req, res, next) => {
   }
 };
 
+const simpanAlergi = async (req, res, next) => {
+  try {
+    const { kunjunganId } = req.params;
+    const { alergiArr } = req.body;
+    const data = await rawatJalanService.simpanAlergi(kunjunganId, alergiArr);
+    res.status(200).json({ success: true, message: 'Data alergi berhasil disimpan', data });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const getAlergi = async (req, res, next) => {
+  try {
+    const { kunjunganId } = req.params;
+    const data = await rawatJalanService.getAlergiByKunjungan(kunjunganId);
+    res.status(200).json({ success: true, data });
+  } catch (error) {
+    next(error);
+  }
+};
+
 const pulang = async (req, res, next) => {
   try {
     const { kunjunganId } = req.params;
@@ -171,6 +206,7 @@ module.exports = {
   simpanDiagnosa,
   simpanTindakan,
   selesaikanPemeriksaan,
+  tundaPemeriksaan,
   getRekamMedis,
   getDiagnosa,
   getTindakan,
@@ -179,4 +215,6 @@ module.exports = {
   pulang,
   getRiwayatDokter,
   getRiwayatPasienByRM,
+  simpanAlergi,
+  getAlergi,
 };

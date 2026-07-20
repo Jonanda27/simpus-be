@@ -28,6 +28,9 @@ router.post('/:kunjunganId/diagnosa', rawatJalanController.simpanDiagnosa);
 // Simpan Tindakan ICD-9 (bulk)
 router.post('/:kunjunganId/tindakan', rawatJalanController.simpanTindakan);
 
+// Simpan Alergi (bulk)
+router.post('/:kunjunganId/alergi', rawatJalanController.simpanAlergi);
+
 // Get rekam medis by kunjungan
 router.get('/:kunjunganId/rekam-medis', rawatJalanController.getRekamMedis);
 
@@ -37,8 +40,14 @@ router.get('/:kunjunganId/diagnosa', rawatJalanController.getDiagnosa);
 // Get tindakan by kunjungan
 router.get('/:kunjunganId/tindakan', rawatJalanController.getTindakan);
 
+// Get alergi by kunjungan
+router.get('/:kunjunganId/alergi', rawatJalanController.getAlergi);
+
 // Selesaikan pemeriksaan (Fase 1 Klinis Selesai)
 router.post('/:kunjunganId/selesai', rawatJalanController.selesaikanPemeriksaan);
+
+// Tunda pemeriksaan (Kedaruratan / Ganti Pasien)
+router.post('/:kunjunganId/tunda', rawatJalanController.tundaPemeriksaan);
 
 // Tindak Lanjut: Simpan Resep Obat
 router.post('/:kunjunganId/resep', rawatJalanController.simpanResep);

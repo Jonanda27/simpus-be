@@ -35,6 +35,8 @@ model User {
   penginputRekamMedis RekamMedis[] @relation("PenginputRekamMedis")
   penginputDiagnosis DiagnosisPasien[] @relation("PenginputDiagnosis")
   penginputResep      Resep[]        @relation("PenginputResep")
+  
+  tenagaMedis      TenagaMedis?
 }
 
 // 1. Data Induk Pasien
@@ -77,6 +79,7 @@ model Pasien {
   orderLabs       OrderLaboratorium[]
   tagihans        Tagihan[]
   registerUkm     RegisterUKM[]
+  alergis         AlergiPasien[]
 
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
@@ -182,6 +185,9 @@ model Kunjungan {
   caraDatang        String      // Datang sendiri, Ambulans, Rujukan
   
   noSep             String?
+  encounterId       String?     // ID Encounter dari SATUSEHAT
+  satusehatSync     Json?       // Tracking sinkronisasi SATUSEHAT
+  
   statusKunjungan   String      @default("MENUNGGU") // MENUNGGU, DIPERIKSA, SELESAI, BATAL
   
   // Relasi Ke Petugas (User)
@@ -200,6 +206,7 @@ model Kunjungan {
   screening         Screening?
   rekamMedis        RekamMedis?
   resep             Resep[]
+  alergis           AlergiPasien[]
   rujukanKeluar     RujukanKeluar?
   orderLab          OrderLaboratorium?
   tagihan           Tagihan?
@@ -289,6 +296,8 @@ model Screening {
   statusKesehatan     String?
   prioritasPelayanan  String?
   catatanPetugas      String?
+
+  observationIds      Json?     // Array of SATUSEHAT Observation UUIDs
 
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
@@ -480,6 +489,7 @@ model Poliklinik {
   namaPoli        String
   deskripsi       String?
   statusAktif     Boolean     @default(true)
+  ihsLocationId   String?     @unique
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
 
@@ -701,3 +711,58 @@ model LogPemantauanUKM {
   tindakLanjut    String?
   statusBerobat   String?     // Lanjut, Putus Obat, dll
 }
+
+// ==========================================
+// DATA TENAGA MEDIS (SATUSEHAT)
+// ==========================================
+model TenagaMedis {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  nik       String   @unique
+  noIHS     String?  @unique
+  spesialis String?  // Umum, Gigi, Spesialis Anak, Perawat, dll.
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ==========================================
+// MASTER ALERGI (SATUSEHAT / SNOMED CT)
+// ==========================================
+model MasterAlergi {
+  id_alergi     String   @id @default(cuid())
+  kode_snomed   String   @unique
+  nama_alergi   String
+  kategori      String   // food, medication, environment, biologic
+  status_aktif  Boolean  @default(true)
+  
+  alergiPasiens AlergiPasien[]
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+// ==========================================
+// ALERGI PASIEN (TRANSAKSIONAL)
+// ==========================================
+model AlergiPasien {
+  id              String      @id @default(cuid())
+  pasienId        String
+  pasien          Pasien      @relation(fields: [pasienId], references: [id], onDelete: Cascade)
+  
+  kunjunganId     String
+  kunjungan       Kunjungan   @relation(fields: [kunjunganId], references: [id], onDelete: Cascade)
+  
+  alergiId        String
+  alergiMaster    MasterAlergi @relation(fields: [alergiId], references: [id_alergi])
+  
+  manifestasiKode String      // SNOMED CT untuk reaksi (e.g., 126485001)
+  manifestasiNama String      // Nama reaksi (e.g., Urticaria)
+  tingkatKeparahan String?    // low, high, unable-to-assess
+  statusKlinis    String      @default("active") // active, inactive, resolved
+  
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+}
+

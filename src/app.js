@@ -27,9 +27,14 @@ app.use((req, res, next) => {
 // Serve static files (uploads)
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
+const monitoringRoutes = require('./routes/monitoring.routes');
+const masterAlergiRoutes = require('./routes/masterAlergi.routes');
+
 // API Routes
 app.use('/api', routes);
 app.use('/api/dokter', dokterRoutes);
+app.use('/api/satusehat-monitoring', monitoringRoutes);
+app.use('/api/master-alergi', masterAlergiRoutes);
 
 // Base route for testing
 app.get('/', (req, res) => {

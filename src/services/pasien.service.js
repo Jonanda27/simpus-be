@@ -1,5 +1,6 @@
 const prisma = require('../config/prisma');
 const cloudinary = require('cloudinary').v2;
+const satusehatService = require('./satusehat.service');
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -198,6 +199,48 @@ const createPasien = async (data) => {
         persetujuan: true
       }
     });
+
+    // 3. Create Encounter di SATUSEHAT
+    if (data.persetujuanSatusehat && pasien.noIHS && data.dokterTujuan !== 'Bebas') {
+      try {
+        const dokter = await tx.user.findUnique({
+          where: { id: data.dokterTujuan },
+          include: { tenagaMedis: true }
+        });
+
+        if (dokter && dokter.tenagaMedis && dokter.tenagaMedis.noIHS && poliklinik && poliklinik.ihsLocationId) {
+          const encounterResult = await satusehatService.createEncounter({
+            pasienIhs: pasien.noIHS,
+            pasienName: pasien.namaLengkap,
+            dokterIhs: dokter.tenagaMedis.noIHS,
+            dokterName: dokter.namaLengkap,
+            poliIhs: poliklinik.ihsLocationId,
+            poliName: poliklinik.namaPoli,
+            noKunjungan: kunjungan.id,
+            jenisPelayanan: data.jenisPelayanan, // Rawat Jalan / Rawat Inap / IGD
+            peranDokter: 'ATND' // Default ke Attending Physician
+          });
+
+          if (encounterResult.success) {
+            // Update kunjungan with encounterId and satusehatSync
+            const syncData = {
+              Encounter: { status: 'SUCCESS', id: encounterResult.encounterId }
+            };
+            await tx.kunjungan.update({
+              where: { id: kunjungan.id },
+              data: { 
+                encounterId: encounterResult.encounterId,
+                satusehatSync: syncData
+              }
+            });
+            kunjungan.encounterId = encounterResult.encounterId;
+          }
+        }
+      } catch (error) {
+        console.error('Failed to create Encounter in SATUSEHAT:', error);
+        // We don't throw here to ensure local registration still succeeds
+      }
+    }
 
     return { ...pasien, kunjungan };
   });
