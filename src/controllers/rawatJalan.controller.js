@@ -172,7 +172,7 @@ const simpanAlergi = async (req, res, next) => {
   try {
     const { kunjunganId } = req.params;
     const { alergiArr } = req.body;
-    const data = await rawatJalanService.simpanAlergi(kunjunganId, alergiArr);
+    const data = await rawatJalanService.simpanAlergi(kunjunganId, alergiArr, req.user);
     res.status(200).json({ success: true, message: 'Data alergi berhasil disimpan', data });
   } catch (error) {
     next(error);

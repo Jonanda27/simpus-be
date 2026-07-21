@@ -360,6 +360,7 @@ model DiagnosisPasien {
   
   jenisDiagnosis  String      // Utama, Sekunder, Komorbid, Komplikasi
   diagnosisKlinis String?     // Deskripsi dari dokter
+  statusKlinis    String      @default("Aktif") // Aktif, Sembuh, Kambuh, Remisi
   statusDiagnosis String      @default("Suspek") // Suspek, Kerja, Definitif
   tingkatKepastian String?    // Probable, Confirmed, Rule Out
   kondisiMasuk    String?     // Baru, Lama, Kambuh

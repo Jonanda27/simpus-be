@@ -1,11 +1,34 @@
 const buildConditionPayload = (data) => {
-  // Map status lokal ke FHIR verificationStatus
-  let verCode = "provisional"; // Default untuk Suspek atau Kerja
+  // Map status lokal (verificationStatus) ke FHIR
+  let verCode = "provisional"; // Default
   let verDisplay = "Provisional";
+  const ver = data.statusDiagnosis ? data.statusDiagnosis.toLowerCase() : "";
   
-  if (data.statusDiagnosis && data.statusDiagnosis.toLowerCase() === "definitif") {
+  if (ver === "definitif") {
     verCode = "confirmed";
     verDisplay = "Confirmed";
+  } else if (ver === "menyingkirkan" || ver === "rule out") {
+    verCode = "refuted";
+    verDisplay = "Refuted";
+  } else if (ver === "kerja") {
+    verCode = "differential";
+    verDisplay = "Differential";
+  }
+
+  // Map status klinis (clinicalStatus) ke FHIR
+  let clinCode = "active"; // Default
+  let clinDisplay = "Active";
+  const clin = data.statusKlinis ? data.statusKlinis.toLowerCase() : "";
+
+  if (clin === "sembuh") {
+    clinCode = "resolved";
+    clinDisplay = "Resolved";
+  } else if (clin === "kambuh") {
+    clinCode = "relapse";
+    clinDisplay = "Relapse";
+  } else if (clin === "remisi") {
+    clinCode = "remission";
+    clinDisplay = "Remission";
   }
 
   return {
@@ -14,8 +37,8 @@ const buildConditionPayload = (data) => {
       coding: [
         {
           system: "http://terminology.hl7.org/CodeSystem/condition-clinical",
-          code: "active",
-          display: "Active"
+          code: clinCode,
+          display: clinDisplay
         }
       ]
     },

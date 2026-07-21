@@ -1,5 +1,6 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
+const satusehatService = require('../services/satusehat.service');
 
 // 1. Get Antrian Farmasi (MENUNGGU_FARMASI)
 exports.getAntrianFarmasi = async (req, res) => {
@@ -13,7 +14,10 @@ exports.getAntrianFarmasi = async (req, res) => {
         dokter: true,
         kunjungan: {
           include: {
-            poliklinik: true
+            poliklinik: true,
+            tagihan: {
+              select: { statusTagihan: true }
+            }
           }
         },
         details: {
@@ -48,7 +52,10 @@ exports.getResepById = async (req, res) => {
         dokter: true,
         kunjungan: {
           include: {
-            poliklinik: true
+            poliklinik: true,
+            tagihan: {
+              select: { statusTagihan: true }
+            }
           }
         },
         details: {
@@ -83,7 +90,16 @@ exports.prosesResep = async (req, res) => {
       // 1. Ambil resep beserta detailnya
       const resep = await tx.resep.findUnique({
         where: { id },
-        include: { details: true, kunjungan: true }
+        include: { 
+          details: {
+            include: { obat: true }
+          }, 
+          kunjungan: {
+            include: { poliklinik: true }
+          },
+          pasien: true,
+          dokter: { include: { tenagaMedis: true } }
+        }
       });
 
       if (!resep) {
@@ -124,19 +140,67 @@ exports.prosesResep = async (req, res) => {
         data: { status: 'SELESAI' }
       });
 
-      // 4. Update status Kunjungan menjadi MENUNGGU_KASIR
+      // 4. Update status Kunjungan menjadi SELESAI (karena apotek adalah tahap terakhir)
       await tx.kunjungan.update({
         where: { id: resep.kunjunganId },
-        data: { statusKunjungan: 'MENUNGGU_KASIR' }
+        data: { statusKunjungan: 'SELESAI' }
       });
 
-      return updatedResep;
+      return { updatedResep, resepLengkap: resep };
     });
+
+    // -------------------------------------
+    // Sinkronisasi SATUSEHAT (Luar transaksi)
+    // -------------------------------------
+    const resep = result.resepLengkap;
+    let medCount = 0;
+    for (const detail of resep.details) {
+      if (detail.obat && detail.obat.kodeObat && resep.kunjungan.encounterId && resep.pasien.noIHS && resep.dokter.tenagaMedis?.noIHS) {
+        try {
+          await satusehatService.postMedicationDispense({
+            resepId: resep.id,
+            resepDetailId: `${resep.id}-${detail.obat.id}`,
+            kodeObat: detail.obat.kodeObat,
+            namaObat: detail.obat.namaObat,
+            sediaan: detail.obat.sediaan,
+            pasienIhs: resep.pasien.noIHS,
+            pasienName: resep.pasien.namaLengkap,
+            practitionerIhs: resep.dokter.tenagaMedis.noIHS,
+            practitionerName: resep.dokter.namaLengkap,
+            encounterId: resep.kunjungan.encounterId,
+            locationId: resep.kunjungan.poliklinik.ihsLocationId,
+            locationName: resep.kunjungan.poliklinik.namaPoli,
+            jumlah: detail.jumlah,
+            jumlahHari: 3, // Asumsi standar jika tidak ada data durasi hari
+            instruksi: detail.aturanPakai,
+            frekuensi: 3, 
+            dosis: 1
+          });
+          medCount++;
+        } catch (err) {
+          console.error(`Error sync MedicationDispense SATUSEHAT untuk Obat ${detail.obat.kodeObat}:`, err.message);
+        }
+      }
+    }
+
+    // Update status SATUSEHAT di Kunjungan
+    if (medCount > 0) {
+      const syncStatus = (typeof resep.kunjungan.satusehatSync === 'object' && resep.kunjungan.satusehatSync !== null) 
+        ? { ...resep.kunjungan.satusehatSync } 
+        : {};
+      
+      syncStatus.MedicationDispense = { status: 'SUCCESS', detail: `Sent ${medCount} dispenses` };
+      
+      await prisma.kunjungan.update({
+        where: { id: resep.kunjunganId },
+        data: { satusehatSync: syncStatus }
+      });
+    }
 
     res.json({
       status: 'success',
       message: 'Resep berhasil diproses, stok obat telah dikurangi, dan pasien diarahkan ke Kasir.',
-      data: result
+      data: result.updatedResep
     });
   } catch (error) {
     console.error('Error in prosesResep:', error);

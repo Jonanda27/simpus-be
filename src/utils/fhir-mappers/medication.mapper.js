@@ -1,4 +1,4 @@
-const buildMedicationPayload = (data, orgId) => {
+const buildMedicationPayload = (data, orgId, uniqueId = null) => {
   // Mapping sediaan (form) secara sederhana
   let formCode = "BS023"; // Default Kaplet Salut Selaput
   let formDisplay = "Kaplet Salut Selaput";
@@ -20,7 +20,7 @@ const buildMedicationPayload = (data, orgId) => {
       {
         system: `http://sys-ids.kemkes.go.id/medication/${orgId}`,
         use: "official",
-        value: data.obatId || data.kodeObat // ID lokal obat
+        value: uniqueId || data.resepDetailId || data.kodeObat
       }
     ],
     code: {

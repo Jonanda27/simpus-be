@@ -199,9 +199,61 @@ const syncPoliklinikLocation = async (req, res, next) => {
   }
 };
 
+/**
+ * Search KFA Product
+ */
+const searchKFA = async (req, res, next) => {
+  try {
+    const { keyword } = req.query;
+    const result = await satusehatService.searchKFA(keyword);
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error('SATUSEHAT KFA Search Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal mencari produk KFA',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Mengirim MedicationDispense ke SATUSEHAT
+ */
+const dispenseMedication = async (req, res, next) => {
+  try {
+    const data = req.body;
+    
+    // Validasi data minimal
+    if (!data.resepId || !data.resepDetailId || !data.kodeObat || !data.pasienIhs || !data.practitionerIhs || !data.encounterId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Data tidak lengkap untuk mengirim MedicationDispense'
+      });
+    }
+
+    const result = await satusehatService.postMedicationDispense(data);
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Berhasil mengirim MedicationDispense ke SATUSEHAT',
+      data: result
+    });
+  } catch (error) {
+    console.error('SATUSEHAT MedicationDispense Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal mengirim MedicationDispense',
+      error: error.message
+    });
+  }
+};
+
 module.exports = {
   testAuth,
   syncPatientIHS,
   syncPractitionerIHS,
-  syncPoliklinikLocation
+  syncPoliklinikLocation,
+  searchKFA,
+  dispenseMedication
 };

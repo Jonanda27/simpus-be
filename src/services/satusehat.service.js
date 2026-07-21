@@ -81,6 +81,7 @@ const { buildConditionPayload } = require('../utils/fhir-mappers/condition.mappe
 const { buildMedicationPayload, buildMedicationRequestPayload } = require('../utils/fhir-mappers/medication.mapper');
 const { buildProcedurePayload } = require('../utils/fhir-mappers/procedure.mapper');
 const { buildAllergyPayload } = require('../utils/fhir-mappers/allergy.mapper');
+const { buildMedicationDispensePayload } = require('../utils/fhir-mappers/medication-dispense.mapper');
 
 /**
  * Create Location in SATUSEHAT for a Poliklinik
@@ -208,7 +209,8 @@ const createPrescription = async (data) => {
   }
 
   // 1. Kirim Medication (Definisi Obat)
-  const medicationPayload = buildMedicationPayload(data, orgId);
+  const uniqueMedReqId = data.resepDetailId ? `${data.resepDetailId}-req` : null;
+  const medicationPayload = buildMedicationPayload(data, orgId, uniqueMedReqId);
   console.log("[SATUSEHAT] Mengirim Medication Payload:", JSON.stringify(medicationPayload, null, 2));
   let medicationId;
   try {
@@ -333,6 +335,49 @@ const searchKFA = async (keyword) => {
   }
 };
 
+/**
+ * Mengirim Penyerahan Obat (MedicationDispense) ke SATUSEHAT
+ * Sesuai panduan Kemenkes, ini mengirim Medication kemudian MedicationDispense
+ * @param {Object} data - payload lengkap
+ */
+const postMedicationDispense = async (data) => {
+  const fhirClient = await createFhirClient();
+  const orgId = satusehatConfig.SATUSEHAT_ORG_ID;
+  
+  if (!orgId) {
+    throw new Error('SATUSEHAT_ORG_ID belum dikonfigurasi di file .env');
+  }
+
+  // 1. Kirim Medication (Definisi Obat yang diserahkan)
+  const uniqueMedDispId = data.resepDetailId ? `${data.resepDetailId}-disp` : null;
+  const medicationPayload = buildMedicationPayload(data, orgId, uniqueMedDispId);
+  console.log("[SATUSEHAT] Mengirim Medication (Dispense) Payload:", JSON.stringify(medicationPayload, null, 2));
+  let medicationId;
+  try {
+    const medResponse = await fhirClient.post('/Medication', medicationPayload);
+    medicationId = medResponse.data.id;
+  } catch (error) {
+    console.error(`[SATUSEHAT] Error creating Medication (Dispense) untuk ${data.kodeObat}:`, error.response?.data ? JSON.stringify(error.response?.data, null, 2) : error.message);
+    throw new Error(error.response?.data?.issue?.[0]?.diagnostics || 'Terjadi kesalahan saat mengirim Medication (Dispense) ke SATUSEHAT');
+  }
+
+  // 2. Kirim MedicationDispense (Penyerahan)
+  const dispensePayload = buildMedicationDispensePayload(data, medicationId, orgId);
+  console.log("[SATUSEHAT] Mengirim MedicationDispense Payload:", JSON.stringify(dispensePayload, null, 2));
+  
+  try {
+    const response = await fhirClient.post('/MedicationDispense', dispensePayload);
+    return {
+      success: true,
+      medicationId: medicationId,
+      medicationDispenseId: response.data.id
+    };
+  } catch (error) {
+    console.error(`[SATUSEHAT] Error creating MedicationDispense untuk ${data.kodeObat}:`, error.response?.data ? JSON.stringify(error.response?.data, null, 2) : error.message);
+    throw new Error(error.response?.data?.issue?.[0]?.diagnostics || 'Terjadi kesalahan saat mengirim MedicationDispense ke SATUSEHAT');
+  }
+};
+
 module.exports = {
   generateAccessToken,
   createFhirClient,
@@ -345,5 +390,6 @@ module.exports = {
   createPrescription,
   createProcedure,
   createAllergyIntolerance,
-  searchKFA
+  searchKFA,
+  postMedicationDispense
 };

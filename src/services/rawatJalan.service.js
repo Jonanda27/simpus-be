@@ -298,7 +298,8 @@ const simpanDiagnosa = async (kunjunganId, user, diagnosaArr) => {
       penginputId,
       jenisDiagnosis: d.jenisDiagnosis || 'Utama',
       diagnosisKlinis: d.diagnosisKlinis || null,
-      statusDiagnosis: 'Kerja',
+      statusKlinis: d.statusKlinis || 'Aktif',
+      statusDiagnosis: d.statusVerifikasi || 'Suspek',
     })),
   });
 
@@ -325,7 +326,8 @@ const simpanDiagnosa = async (kunjunganId, user, diagnosaArr) => {
               encounterId: kunjungan.encounterId,
               kodeIcd10: icd10.kode_icd10,
               namaDiagnosis: icd10.nama_diagnosis,
-              statusDiagnosis: 'Kerja'
+              statusDiagnosis: d.statusVerifikasi || 'Suspek',
+              statusKlinis: d.statusKlinis || 'Aktif'
             });
             conditionCount++;
           } catch (err) {
@@ -442,7 +444,7 @@ const simpanTindakan = async (kunjunganId, user, tindakanArr) => {
 /**
  * Simpan data alergi pasien (bulk create) dan sinkronisasi ke SATUSEHAT
  */
-const simpanAlergi = async (kunjunganId, alergiArr) => {
+const simpanAlergi = async (kunjunganId, alergiArr, user) => {
   const kunjungan = await prisma.kunjungan.findUnique({
     where: { id: kunjunganId },
     include: {
@@ -482,13 +484,14 @@ const simpanAlergi = async (kunjunganId, alergiArr) => {
     include: { alergiMaster: true }
   });
 
-  // Sinkronisasi ke SATUSEHAT secara asinkron
-  const { createAllergyIntolerance } = require('./satusehat.service');
-  let syncLogs = kunjungan.satusehatSync || {};
-  if (typeof syncLogs !== 'object') syncLogs = {};
-  if (!syncLogs.allergy) syncLogs.allergy = [];
+  // Sinkronisasi ke SATUSEHAT secara asinkron hanya jika yang menyimpan adalah DOKTER
+  if (user && user.role === 'DOKTER') {
+    const { createAllergyIntolerance } = require('./satusehat.service');
+    let syncLogs = kunjungan.satusehatSync || {};
+    if (typeof syncLogs !== 'object') syncLogs = {};
+    if (!syncLogs.allergy) syncLogs.allergy = [];
 
-  for (const alergi of insertedAlergis) {
+    for (const alergi of insertedAlergis) {
     if (kunjungan.encounterId && kunjungan.dokterTujuan?.tenagaMedis?.noIHS && kunjungan.pasien?.noIHS) {
       try {
         const res = await createAllergyIntolerance(kunjungan.pasien, kunjungan.dokterTujuan, kunjungan, alergi);
@@ -506,11 +509,12 @@ const simpanAlergi = async (kunjunganId, alergiArr) => {
     }
   }
 
-  // Update kunjungan sync logs
-  await prisma.kunjungan.update({
-    where: { id: kunjunganId },
-    data: { satusehatSync: syncLogs }
-  });
+    // Update kunjungan sync logs
+    await prisma.kunjungan.update({
+      where: { id: kunjunganId },
+      data: { satusehatSync: syncLogs }
+    });
+  }
 
   return insertedAlergis;
 };

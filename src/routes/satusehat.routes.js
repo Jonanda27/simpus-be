@@ -14,4 +14,10 @@ router.get('/praktisioner/nik/:nik', satusehatController.syncPractitionerIHS);
 // API to sync Location IHS for a Poliklinik
 router.post('/lokasi/poli/:id', satusehatController.syncPoliklinikLocation);
 
+// API to search KFA
+router.get('/kfa', satusehatController.searchKFA);
+
+// API to POST MedicationDispense
+router.post('/medication-dispense', satusehatController.dispenseMedication);
+
 module.exports = router;
