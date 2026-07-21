@@ -35,6 +35,126 @@ async function main() {
   console.log('✅ Users berhasi di-seed.');
 
   // ==============================================================
+  // 1B. SEED REFERENSI ENUM (DYNAMIC DROPDOWNS FOR FE)
+  // ==============================================================
+  const refJenisPenjamins = [
+    { kode: 'UMUM', label: 'Umum / Mandiri', isBpjs: false, urutan: 1 },
+    { kode: 'BPJS', label: 'BPJS Kesehatan', isBpjs: true, urutan: 2 },
+    { kode: 'ASURANSI', label: 'Asuransi Swasta', isBpjs: false, urutan: 3 },
+    { kode: 'PERUSAHAAN', label: 'Perusahaan', isBpjs: false, urutan: 4 },
+    { kode: 'JAMINAN_DAERAH', label: 'Jaminan Kesehatan Daerah (Jamkesda)', isBpjs: false, urutan: 5 },
+  ];
+  for (const item of refJenisPenjamins) {
+    await prisma.refJenisPenjamin.upsert({
+      where: { kode: item.kode },
+      update: { label: item.label, isBpjs: item.isBpjs, urutan: item.urutan },
+      create: item,
+    });
+  }
+
+  const refJenisPelayanans = [
+    { kode: 'RAWAT_JALAN', label: 'Rawat Jalan' },
+    { kode: 'RAWAT_INAP', label: 'Rawat Inap' },
+    { kode: 'IGD', label: 'Instalasi Gawat Darurat (IGD)' },
+    { kode: 'UKM', label: 'Usaha Kesehatan Masyarakat (UKM)' },
+  ];
+  for (const item of refJenisPelayanans) {
+    await prisma.refJenisPelayanan.upsert({
+      where: { kode: item.kode },
+      update: { label: item.label },
+      create: item,
+    });
+  }
+
+  const refCaraDatangs = [
+    { kode: 'MANDIRI', label: 'Datang Sendiri', butuhDataRujukan: false },
+    { kode: 'AMBULANS', label: 'Ambulans', butuhDataRujukan: false },
+    { kode: 'RUJUKAN', label: 'Rujukan', butuhDataRujukan: true },
+  ];
+  for (const item of refCaraDatangs) {
+    await prisma.refCaraDatang.upsert({
+      where: { kode: item.kode },
+      update: { label: item.label, butuhDataRujukan: item.butuhDataRujukan },
+      create: item,
+    });
+  }
+
+  const refPrioritass = [
+    { kode: 'UMUM', label: 'Umum', warnaBadge: 'gray', urutan: 1 },
+    { kode: 'LANSIA', label: 'Lansia (>60 Tahun)', warnaBadge: 'yellow', urutan: 2 },
+    { kode: 'DISABILITAS', label: 'Disabilitas', warnaBadge: 'blue', urutan: 3 },
+    { kode: 'HAMIL', label: 'Ibu Hamil / Menyusui', warnaBadge: 'pink', urutan: 4 },
+    { kode: 'ANAK', label: 'Bayi & Anak-anak', warnaBadge: 'green', urutan: 5 },
+  ];
+  for (const item of refPrioritass) {
+    await prisma.refPrioritas.upsert({
+      where: { kode: item.kode },
+      update: { label: item.label, warnaBadge: item.warnaBadge, urutan: item.urutan },
+      create: item,
+    });
+  }
+
+  const refKategoriTriages = [
+    { kode: 'MERAH', label: 'Resusitasi / Merah (Gawat Darurat)', warna: '#EF4444', urutan: 1 },
+    { kode: 'KUNING', label: 'Urgent / Kuning (Darurat Tidak Gawat)', warna: '#F59E0B', urutan: 2 },
+    { kode: 'HIJAU', label: 'Non-Urgent / Hijau (Tidak Gawat Tidak Darurat)', warna: '#10B981', urutan: 3 },
+    { kode: 'HITAM', label: 'Meninggal Dunia / Hitam', warna: '#1F2937', urutan: 4 },
+  ];
+  for (const item of refKategoriTriages) {
+    await prisma.refKategoriTriage.upsert({
+      where: { kode: item.kode },
+      update: { label: item.label, warna: item.warna, urutan: item.urutan },
+      create: item,
+    });
+  }
+
+  const refMetodePembayarans = [
+    { kode: 'TUNAI', label: 'Tunai', isBpjs: false },
+    { kode: 'TRANSFER', label: 'Transfer Bank', isBpjs: false },
+    { kode: 'QRIS', label: 'QRIS', isBpjs: false },
+    { kode: 'BPJS', label: 'Klaim BPJS', isBpjs: true },
+  ];
+  for (const item of refMetodePembayarans) {
+    await prisma.refMetodePembayaran.upsert({
+      where: { kode: item.kode },
+      update: { label: item.label, isBpjs: item.isBpjs },
+      create: item,
+    });
+  }
+
+  const refSediaanObats = [
+    { kode: 'TABLET', label: 'Tablet' },
+    { kode: 'KAPSUL', label: 'Kapsul' },
+    { kode: 'SIRUP', label: 'Sirup / Larutan' },
+    { kode: 'INJEKSI', label: 'Injeksi / Ampul / Vial' },
+    { kode: 'SALEP', label: 'Salep / Krim / Gel' },
+  ];
+  for (const item of refSediaanObats) {
+    await prisma.refSediaanObat.upsert({
+      where: { kode: item.kode },
+      update: { label: item.label },
+      create: item,
+    });
+  }
+
+  const refKategoriObats = [
+    { kode: 'OBAT_BEBAS', label: 'Obat Bebas', warnaBadge: 'green' },
+    { kode: 'OBAT_BEBAS_TERBATAS', label: 'Obat Bebas Terbatas', warnaBadge: 'blue' },
+    { kode: 'OBAT_KERAS', label: 'Obat Keras', warnaBadge: 'red' },
+    { kode: 'NARKOTIKA', label: 'Narkotika', warnaBadge: 'purple' },
+    { kode: 'PSIKOTROPIKA', label: 'Psikotropika', warnaBadge: 'yellow' },
+  ];
+  for (const item of refKategoriObats) {
+    await prisma.refKategoriObat.upsert({
+      where: { kode: item.kode },
+      update: { label: item.label, warnaBadge: item.warnaBadge },
+      create: item,
+    });
+  }
+  console.log('✅ Referensi Enum berhasil di-seed.');
+
+
+  // ==============================================================
   // 2. SEED POLIKLINIK, LAYANAN, & DOKTER POLI
   // ==========================================
   const masterPolis = [

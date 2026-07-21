@@ -1,6 +1,8 @@
 const prisma = require('../config/prisma');
 const cloudinary = require('cloudinary').v2;
 const satusehatService = require('./satusehat.service');
+const PCareService = require('./bpjs/pcare.service');
+const bpjsConfig = require('../config/bpjs');
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -239,6 +241,55 @@ const createPasien = async (data) => {
       } catch (error) {
         console.error('Failed to create Encounter in SATUSEHAT:', error);
         // We don't throw here to ensure local registration still succeeds
+      }
+    }
+
+    // ================================================================
+    // [BPJS PCARE BRIDGING] Anti-Corruption Layer — Soft-fail Pattern
+    // Identik dengan pola SATUSEHAT di atas: pendaftaran lokal SELALU sukses.
+    // Jika BPJS down → statusKlaimBpjs = 'PENDING_SYNC' (bisa di-sync ulang nanti).
+    // ================================================================
+    const isBpjs = data.jenisPenjamin === 'BPJS' || data.jenisPenjamin === 'BPJS Kesehatan';
+    const hasBpjsCredentials = bpjsConfig.BPJS_CONS_ID && bpjsConfig.BPJS_SECRET_KEY;
+
+    if (isBpjs && data.noBpjs && hasBpjsCredentials) {
+      try {
+        // Format tanggal ke YYYY-MM-DD (requirement PCare)
+        const tglDaftar = new Date(data.tanggalRegistrasi).toISOString().split('T')[0];
+
+        const pcareResult = await PCareService.daftarkanKunjungan({
+          noBpjs: data.noBpjs,
+          tanggalRegistrasi: tglDaftar,
+          kdPoliTujuan: poliklinik?.kodePoli || data.poliTujuan,
+          noRM: pasien.noRM,
+        });
+
+        // Sukses → simpan nomor kunjungan PCare ke database
+        await tx.kunjungan.update({
+          where: { id: kunjungan.id },
+          data: {
+            noKunjunganPcare: pcareResult.noKunjungan,
+            noUrutPcare: pcareResult.noUrut?.toString(),
+            statusKlaimBpjs: 'TERKIRIM',
+          },
+        });
+
+        kunjungan.noKunjunganPcare = pcareResult.noKunjungan;
+        kunjungan.statusKlaimBpjs = 'TERKIRIM';
+
+        console.log(`[BPJS PCare] Kunjungan berhasil didaftarkan. NoKunjungan: ${pcareResult.noKunjungan}`);
+      } catch (bpjsError) {
+        // SOFT-FAIL: BPJS down/error → catat sebagai PENDING_SYNC
+        // Petugas bisa sync ulang nanti via tombol di frontend.
+        console.error('[BPJS PCare] Gagal mendaftarkan kunjungan (soft-fail):', bpjsError.message);
+
+        await tx.kunjungan.update({
+          where: { id: kunjungan.id },
+          data: { statusKlaimBpjs: 'PENDING_SYNC' },
+        });
+
+        kunjungan.statusKlaimBpjs = 'PENDING_SYNC';
+        // TIDAK throw error — pendaftaran lokal tetap sukses!
       }
     }
 

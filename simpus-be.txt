@@ -27,17 +27,19 @@ app.listen(PORT, () => {
   "type": "commonjs",
   "dependencies": {
     "@prisma/client": "^5.22.0",
+    "axios": "^1.18.1",
     "bcryptjs": "^3.0.3",
     "cloudinary": "^2.10.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
-    "multer": "^2.2.0",
-    "prisma": "^5.22.0"
+    "lz-string": "^1.5.0",
+    "multer": "^2.2.0"
   },
   "devDependencies": {
-    "nodemon": "^3.1.14"
+    "nodemon": "^3.1.14",
+    "prisma": "^5.22.0"
   },
   "prisma": {
     "seed": "node prisma/seed.js"
@@ -79,9 +81,17 @@ model User {
   rujukanKeluar    RujukanKeluar[]  @relation("DokterRujukan")
   orderLabs        OrderLaboratorium[] @relation("DokterOrderLab")
 
+  // Relasi Radiologi Baru
+  orderRadiologi   OrderRadiologi[]       @relation("DokterOrderRadiologi")
+  bacaRadiologi    PemeriksaanRadiologi[] @relation("DokterBacaRadiologi")
+
   penginputRekamMedis RekamMedis[] @relation("PenginputRekamMedis")
   penginputDiagnosis DiagnosisPasien[] @relation("PenginputDiagnosis")
   penginputResep      Resep[]        @relation("PenginputResep")
+  // Relasi Imunisasi (Baru)
+  imunisasiDilakukan  RiwayatImunisasi[] @relation("PetugasImunisasi")
+
+  tenagaMedis      TenagaMedis?
 }
 
 // 1. Data Induk Pasien
@@ -122,8 +132,11 @@ model Pasien {
   resep           Resep[]
   rujukanKeluar   RujukanKeluar[]
   orderLabs       OrderLaboratorium[]
+  orderRadiologi  OrderRadiologi[]
   tagihans        Tagihan[]
+  riwayatImunisasi  RiwayatImunisasi[]
   registerUkm     RegisterUKM[]
+  alergis         AlergiPasien[]
 
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
@@ -214,6 +227,8 @@ model Kunjungan {
   pasienId        String
   pasien          Pasien      @relation(fields: [pasienId], references: [id], onDelete: Cascade)
 
+  satusehatId     String?     @unique // ID Encounter dari SATUSEHAT (PONDASI UTAMA)
+
   tanggalRegistrasi DateTime
   jamRegistrasi     String
   timestamp         String?
@@ -229,7 +244,17 @@ model Kunjungan {
   caraDatang        String      // Datang sendiri, Ambulans, Rujukan
 
   noSep             String?
-  statusKunjungan   String      @default("MENUNGGU") // MENUNGGU, DIPERIKSA, SELESAI, BATAL
+  encounterId       String?     // ID Encounter dari SATUSEHAT
+  satusehatSync     Json?       // Tracking sinkronisasi SATUSEHAT
+
+  // ==========================================
+  // KOLOM BRIDGING BPJS PCARE (Anti-Corruption Layer)
+  // ==========================================
+  noKunjunganPcare  String?     // Nomor Kunjungan dari API PCare BPJS (setara SEP di RS)
+  noUrutPcare       String?     // Nomor urut antrian di PCare
+  statusKlaimBpjs   String?     // PENDING_SYNC | TERKIRIM | GAGAL | TIDAK_BERLAKU
+
+  statusKunjungan   String      @default("MENUNGGU") // MENUNGGU, DIPERIKSA, SELESAI, BATAL dll
 
   // Relasi Ke Petugas (User)
   userPendaftarId   String?
@@ -247,9 +272,13 @@ model Kunjungan {
   screening         Screening?
   rekamMedis        RekamMedis?
   resep             Resep[]
+  alergis           AlergiPasien[]
   rujukanKeluar     RujukanKeluar?
   orderLab          OrderLaboratorium?
+  orderRadiologi    OrderRadiologi?
+  pemeriksaanRadiologi PemeriksaanRadiologi[] // Relasi langsung untuk mempermudah query ImagingStudy
   tagihan           Tagihan?
+  riwayatImunisasi  RiwayatImunisasi[] // 1 Kunjungan bisa banyak suntikan vaksin
 
   createdAt         DateTime    @default(now())
   updatedAt         DateTime    @updatedAt
@@ -277,7 +306,7 @@ model PersetujuanMedis {
 
   persetujuanPengobatan Boolean @default(false)
   persetujuanRekamMedis Boolean @default(false)
-  persetujuanSatusehat  Boolean @default(false)
+  persetujuanSatusehat  Boolean @default(false) // SAKLAR UTAMA INTEGRASI
   persetujuanReminder   Boolean @default(false)
 
   tandaTangan           String  @db.Text
@@ -337,6 +366,8 @@ model Screening {
   prioritasPelayanan  String?
   catatanPetugas      String?
 
+  observationIds      Json?     // Array of SATUSEHAT Observation UUIDs
+
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
 }
@@ -383,6 +414,8 @@ model RekamMedis {
 // 11. Data Diagnosis Pasien (Transaksi ICD-10)
 model DiagnosisPasien {
   id              String      @id @default(cuid())
+  satusehatId     String?     @unique // ID Condition dari SATUSEHAT
+
   pasienId        String
   pasien          Pasien      @relation(fields: [pasienId], references: [id], onDelete: Cascade)
 
@@ -398,6 +431,7 @@ model DiagnosisPasien {
 
   jenisDiagnosis  String      // Utama, Sekunder, Komorbid, Komplikasi
   diagnosisKlinis String?     // Deskripsi dari dokter
+  statusKlinis    String      @default("Aktif") // Aktif, Sembuh, Kambuh, Remisi
   statusDiagnosis String      @default("Suspek") // Suspek, Kerja, Definitif
   tingkatKepastian String?    // Probable, Confirmed, Rule Out
   kondisiMasuk    String?     // Baru, Lama, Kambuh
@@ -409,7 +443,7 @@ model DiagnosisPasien {
   tanggalSembuh   DateTime?
   statusAkhir     String?     // Aktif, Sembuh, Meninggal, Dirujuk
 
-  sinkronSatusehat Boolean    @default(false)
+  sinkronSatusehat Boolean    @default(false) // Deprecated: Diganti dengan pengecekan satusehatId
 
   penginputId             String?   // ID Asisten/Perawat yang menginput data
   penginput               User?     @relation("PenginputDiagnosis", fields: [penginputId], references: [id])
@@ -421,6 +455,8 @@ model DiagnosisPasien {
 // 12. Data Tindakan/Prosedur Pasien (ICD-9-CM)
 model TindakanPasien {
   id              String      @id @default(cuid())
+  satusehatId     String?     @unique // ID Procedure dari SATUSEHAT
+
   pasienId        String
   pasien          Pasien      @relation(fields: [pasienId], references: [id], onDelete: Cascade)
 
@@ -527,6 +563,7 @@ model Poliklinik {
   namaPoli        String
   deskripsi       String?
   statusAktif     Boolean     @default(true)
+  ihsLocationId   String?     @unique
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
 
@@ -654,6 +691,78 @@ model OrderLaboratoriumDetail {
 }
 
 // ==========================================
+// MODUL RADIOLOGI & IMAGING STUDY (SATUSEHAT)
+// ==========================================
+
+model MasterModality {
+  id              String      @id @default(cuid())
+  kodeDicom       String      @unique // Contoh: DX, CT, MR, US
+  namaModality    String      // Contoh: Digital Radiography, Computed Tomography
+  deskripsi       String?
+  statusAktif     Boolean     @default(true)
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  pemeriksaan     PemeriksaanRadiologi[]
+}
+
+// Wadah untuk Order/Permintaan dari Dokter (Induk dari pemeriksaan)
+model OrderRadiologi {
+  id              String      @id @default(cuid())
+
+  kunjunganId     String      @unique
+  kunjungan       Kunjungan   @relation(fields: [kunjunganId], references: [id], onDelete: Cascade)
+
+  pasienId        String
+  pasien          Pasien      @relation(fields: [pasienId], references: [id], onDelete: Cascade)
+
+  dokterId        String
+  dokter          User        @relation("DokterOrderRadiologi", fields: [dokterId], references: [id])
+
+  status          String      @default("MENUNGGU_RADIOLOGI") // MENUNGGU_RADIOLOGI, DIPROSES, SELESAI, DIBATALKAN
+  catatanKlinis   String?     @db.Text
+  tanggalOrder    DateTime    @default(now())
+
+  pemeriksaan     PemeriksaanRadiologi[]
+}
+
+// Wadah Utama ImagingStudy (One-to-Many terhadap Order & Kunjungan)
+// Termasuk Ekspertise/Hasil bacaan dokter (Disatukan untuk High Cohesion)
+model PemeriksaanRadiologi {
+  id                String      @id @default(cuid())
+
+  orderId           String
+  order             OrderRadiologi @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  // Keterkaitan langsung ke Kunjungan untuk mempermudah Query Gateway SATUSEHAT
+  kunjunganId       String
+  kunjungan         Kunjungan   @relation(fields: [kunjunganId], references: [id], onDelete: Cascade)
+
+  modalityId        String
+  modality          MasterModality @relation(fields: [modalityId], references: [id])
+
+  // Pondasi SATUSEHAT
+  satusehatId       String?     @unique // ID resource ImagingStudy di SATUSEHAT
+  studyInstanceUid  String?     @unique // UID unik dari mesin modalitas radiologi
+
+  bodySite          String      // Bagian tubuh yang diperiksa (Standar SNOMED CT)
+  waktuPemeriksaan  DateTime    @default(now())
+
+  // Ekspertise Radiologi / DiagnosticReport
+  interpretasi      String?     @db.Text
+  kesan             String?     @db.Text
+
+  // Dokter spesialis yang membaca hasil rontgen
+  dokterPembacaId   String?
+  dokterPembaca     User?       @relation("DokterBacaRadiologi", fields: [dokterPembacaId], references: [id])
+
+  fileDicomUrl      String?     // URL penyimpanan file jika menggunakan PACS/Cloud
+
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+}
+
+// ==========================================
 // MODUL KASIR (TAGIHAN & PEMBAYARAN)
 // ==========================================
 
@@ -680,7 +789,7 @@ model DetailTagihan {
   tagihan         Tagihan     @relation(fields: [tagihanId], references: [id], onDelete: Cascade)
 
   namaItem        String
-  kategori        String      // Pendaftaran, Tindakan, Obat, Laboratorium
+  kategori        String      // Pendaftaran, Tindakan, Obat, Laboratorium, Radiologi
   jumlah          Int         @default(1)
   hargaSatuan     Float
   subTotal        Float
@@ -701,6 +810,82 @@ model Pembayaran {
 }
 
 // ==========================================
+// MODUL IMUNISASI (SATUSEHAT IMMUNIZATION)
+// ==========================================
+
+// 1. Tabel Pondasi: Master Vaksin berdasarkan KFA (Kamus Farmasi)
+model MasterVaksin {
+  id              String      @id @default(cuid())
+  kodeKfa         String      @unique // Kode standar dari SATUSEHAT
+  namaVaksin      String      // Contoh: Vaksin BCG, Vaksin DPT
+  targetPenyakit  String?     // Contoh: TBC, Difteri, Polio
+  statusAktif     Boolean     @default(true)
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  batchVaksin     BatchVaksin[]
+}
+
+// 2. Tabel Logistik Sementara: Batch Vaksin yang tersedia di kulkas Puskesmas
+model BatchVaksin {
+  id              String      @id @default(cuid())
+
+  vaksinId        String
+  vaksin          MasterVaksin @relation(fields: [vaksinId], references: [id], onDelete: Restrict)
+
+  noBatch         String      // Nomor Lot/Batch produksi dari pabrik
+  tanggalExpired  DateTime    // Tanggal kedaluwarsa vaksin
+  stok            Int         @default(0) // Jumlah vial/dosis
+  statusAktif     Boolean     @default(true)
+
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  riwayatSuntik   RiwayatImunisasi[]
+
+  // Proteksi Arsitektur: 1 Vaksin tidak boleh punya 2 Nomor Batch yang sama persis
+  @@unique([vaksinId, noBatch])
+}
+
+// 3. Tabel Transaksi Inti: Riwayat Penyuntikan
+model RiwayatImunisasi {
+  id                String      @id @default(cuid())
+
+  // Pondasi SATUSEHAT & Penanda Sumber Data
+  satusehatId       String?     @unique // ID Immunization dari Kemenkes (Tanda Terima)
+  isRiwayatLuar     Boolean     @default(false) // TRUE jika ini catatan dari RS/Bidan lain
+
+  // Relasi Domain
+  pasienId          String
+  pasien            Pasien      @relation(fields: [pasienId], references: [id], onDelete: Cascade)
+
+  // Kunjungan Boleh Kosong (Nullable) jika isRiwayatLuar = true
+  kunjunganId       String?
+  kunjungan         Kunjungan?  @relation(fields: [kunjunganId], references: [id], onDelete: Cascade)
+
+  // Vaksin spesifik mana dan Batch nomor berapa yang dipakai?
+  batchVaksinId     String
+  batchVaksin       BatchVaksin @relation(fields: [batchVaksinId], references: [id], onDelete: Restrict)
+
+  // Atribut Detail Klinis (Sesuai Syarat SATUSEHAT)
+  tanggalSuntik     DateTime    @default(now())
+  dosisKe           Int         // Dosis 1, Dosis 2, dst.
+  dosisJumlah       Float?      // Jumlah takaran, misal: 0.5 (mL)
+
+  lokasiSuntik      String?     // Kode SNOMED CT (Misal: Lengan Kiri, Paha Kanan)
+  ruteSuntik        String?     // Kode SNOMED CT (Misal: Intramuscular, Oral)
+
+  // Petugas pelaksana
+  petugasId         String?     // Boleh kosong jika riwayat dari luar
+  petugas           User?       @relation("PetugasImunisasi", fields: [petugasId], references: [id])
+
+  catatan           String?     @db.Text
+
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+}
+
+// ==========================================
 // MODUL UKM (PELAYANAN KESEHATAN MASYARAKAT)
 // ==========================================
 
@@ -717,21 +902,29 @@ model ProgramUKM {
 }
 
 model RegisterUKM {
-  id              String      @id @default(cuid())
+  id                    String      @id @default(cuid())
 
-  pasienId        String
-  pasien          Pasien      @relation(fields: [pasienId], references: [id], onDelete: Cascade)
+  // ==========================================
+  // [BARU] PONDASI INTEGRASI SATUSEHAT
+  // ==========================================
+  satusehatEpisodeId    String?     @unique // ID balasan dari API EpisodeOfCare
+  satusehatConditionId  String?     @unique // ID balasan dari API Condition
+  diagnosaAwal          String?     // Kode ICD-10 Spesifik (Cth: A15.0 untuk TB, B20 untuk HIV, Z34 untuk Kehamilan)
 
-  programId       String
-  program         ProgramUKM  @relation(fields: [programId], references: [id], onDelete: Restrict)
+  // Relasi Internal (Eksisting)
+  pasienId              String
+  pasien                Pasien      @relation(fields: [pasienId], references: [id], onDelete: Cascade)
 
-  tanggalDaftar   DateTime    @default(now())
-  statusProgram   String      @default("AKTIF") // AKTIF, SEMBUH, PUTUS_OBAT, MENINGGAL, RUJUK
+  programId             String
+  program               ProgramUKM  @relation(fields: [programId], references: [id], onDelete: Restrict)
 
-  createdAt       DateTime    @default(now())
-  updatedAt       DateTime    @updatedAt
+  tanggalDaftar         DateTime    @default(now())
+  statusProgram         String      @default("AKTIF") // AKTIF, SEMBUH, PUTUS_OBAT, MENINGGAL, RUJUK
 
-  logPemantauan   LogPemantauanUKM[]
+  createdAt             DateTime    @default(now())
+  updatedAt             DateTime    @updatedAt
+
+  logPemantauan         LogPemantauanUKM[]
 
   @@unique([pasienId, programId])
 }
@@ -749,6 +942,61 @@ model LogPemantauanUKM {
   statusBerobat   String?     // Lanjut, Putus Obat, dll
 }
 
+// ==========================================
+// DATA TENAGA MEDIS (SATUSEHAT)
+// ==========================================
+model TenagaMedis {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  nik       String   @unique
+  noIHS     String?  @unique
+  spesialis String?  // Umum, Gigi, Spesialis Anak, Perawat, dll.
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ==========================================
+// MASTER ALERGI (SATUSEHAT / SNOMED CT)
+// ==========================================
+model MasterAlergi {
+  id_alergi     String   @id @default(cuid())
+  kode_snomed   String   @unique
+  nama_alergi   String
+  kategori      String   // food, medication, environment, biologic
+  status_aktif  Boolean  @default(true)
+
+  alergiPasiens AlergiPasien[]
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+// ==========================================
+// ALERGI PASIEN (TRANSAKSIONAL)
+// ==========================================
+model AlergiPasien {
+  id              String      @id @default(cuid())
+  pasienId        String
+  pasien          Pasien      @relation(fields: [pasienId], references: [id], onDelete: Cascade)
+
+  kunjunganId     String
+  kunjungan       Kunjungan   @relation(fields: [kunjunganId], references: [id], onDelete: Cascade)
+
+  alergiId        String
+  alergiMaster    MasterAlergi @relation(fields: [alergiId], references: [id_alergi])
+
+  manifestasiKode String      // SNOMED CT untuk reaksi (e.g., 126485001)
+  manifestasiNama String      // Nama reaksi (e.g., Urticaria)
+  tingkatKeparahan String?    // low, high, unable-to-assess
+  statusKlinis    String      @default("active") // active, inactive, resolved
+
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+}
+
+
 --- FILE: prisma\seed.js ---
 const { PrismaClient } = require('@prisma/client');
 const bcrypt = require('bcryptjs');
@@ -756,60 +1004,36 @@ const bcrypt = require('bcryptjs');
 const prisma = new PrismaClient();
 
 async function main() {
-  console.log('Start seeding...');
+  console.log('🚀 Memulai proses Seeding Data Puskesmas (Simulasi Real-World)...');
 
   const passwordHash = await bcrypt.hash('password123', 10);
 
   const users = [
-    {
-      username: 'admin',
-      role: 'ADMIN',
-    },
-    {
-      username: 'administrasi',
-      role: 'ADMINISTRASI',
-    },
-    {
-      username: 'apoteker',
-      role: 'APOTEKER',
-    },
-    {
-      username: 'laboratorium',
-      role: 'LABORATORIUM',
-    },
-    {
-      username: 'kasir',
-      role: 'KASIR',
-    },
-    {
-      username: 'petugas_ukm',
-      role: 'PETUGAS_UKM',
-    },
+    { username: 'admin', role: 'ADMIN', namaLengkap: 'Administrator Sistem' },
+    { username: 'administrasi', role: 'ADMINISTRASI', namaLengkap: 'Petugas Loket Pendaftaran' },
+    { username: 'apoteker', role: 'APOTEKER', namaLengkap: 'Budi Farmasi, S.Farm., Apt.' },
+    { username: 'laboratorium', role: 'LABORATORIUM', namaLengkap: 'Siti Analis, Amd.AK' },
+    { username: 'kasir', role: 'KASIR', namaLengkap: 'Petugas Kasir Utama' },
+    { username: 'petugas_ukm', role: 'PETUGAS_UKM', namaLengkap: 'Perawat Program UKM' },
   ];
 
   for (const user of users) {
-    const existingUser = await prisma.user.findUnique({
+    await prisma.user.upsert({
       where: { username: user.username },
+      update: { namaLengkap: user.namaLengkap },
+      create: {
+        username: user.username,
+        password: passwordHash,
+        namaLengkap: user.namaLengkap,
+        role: user.role,
+      },
     });
-
-    if (!existingUser) {
-      await prisma.user.create({
-        data: {
-          username: user.username,
-          password: passwordHash,
-          role: user.role,
-        },
-      });
-      console.log(`Created user: ${user.username} with role ${user.role}`);
-    } else {
-      console.log(`User ${user.username} already exists. Skipping.`);
-    }
   }
+  console.log('✅ Users berhasi di-seed.');
 
   const masterPolis = [
     {
-      kodePoli: 'RAD',
-      namaPoli: 'Radiologi',
+      kodePoli: 'RAD', namaPoli: 'Radiologi',
       layanans: [
         { kode: '01.24', nama: 'CT Scan Kepala', tarif: 800000 },
         { kode: '87.44', nama: 'Foto Thoraks', tarif: 150000 },
@@ -817,74 +1041,26 @@ async function main() {
       ]
     },
     {
-      kodePoli: 'NEURO',
-      namaPoli: 'Poli Saraf / Neurologi',
+      kodePoli: 'UMUM', namaPoli: 'Poli Umum / Tindakan Umum',
       layanans: [
-        { kode: '03.31', nama: 'Pungsi Lumbal', tarif: 450000 },
-      ]
-    },
-    {
-      kodePoli: 'BEDAH',
-      namaPoli: 'Poli Bedah',
-      layanans: [
-        { kode: '06.02', nama: 'Biopsi Tiroid', tarif: 550000 },
-        { kode: '86.04', nama: 'Debridement Luka', tarif: 100000 },
+        { kode: 'KONSUL-UMUM', nama: 'Konsultasi Dokter Umum', tarif: 15000 },
+        { kode: '38.93', nama: 'Pemasangan Infus', tarif: 50000 },
         { kode: '86.59', nama: 'Penjahitan Luka (Bedah Minor)', tarif: 120000 },
       ]
     },
     {
-      kodePoli: 'THT',
-      namaPoli: 'Poli THT',
+      kodePoli: 'KIA', namaPoli: 'Poli KIA & Kebidanan',
       layanans: [
-        { kode: '21.01', nama: 'Pemeriksaan Rongga Hidung', tarif: 60000 },
+        { kode: 'KONSUL-KIA', nama: 'Konsultasi Ibu Hamil (ANC)', tarif: 20000 },
+        { kode: '99.15', nama: 'Imunisasi/Injeksi Vaksin', tarif: 45000 },
+        { kode: '70.50', nama: 'Persalinan Normal', tarif: 1200000 },
       ]
     },
     {
-      kodePoli: 'GIGI',
-      namaPoli: 'Poli Gigi (Kedokteran Gigi)',
+      kodePoli: 'GIGI', namaPoli: 'Poli Gigi',
       layanans: [
         { kode: '23.09', nama: 'Ekstraksi Gigi', tarif: 150000 },
-      ]
-    },
-    {
-      kodePoli: 'UMUM',
-      namaPoli: 'Poli Umum / Tindakan Umum',
-      layanans: [
-        { kode: '38.93', nama: 'Pemasangan Infus', tarif: 50000 },
-        { kode: '57.94', nama: 'Pemasangan Kateter Urin', tarif: 75000 },
-        { kode: '89.52', nama: 'Elektrokardiogram (EKG)', tarif: 85000 },
-        { kode: '96.04', nama: 'Pemberian Oksigen (Tindakan Respirasi)', tarif: 40000 },
-      ]
-    },
-    {
-      kodePoli: 'KIA',
-      namaPoli: 'Poli KIA & Kebidanan',
-      layanans: [
-        { kode: '70.50', nama: 'Persalinan Normal', tarif: 1200000 },
-        { kode: '73.59', nama: 'Episiotomi', tarif: 300000 },
-        { kode: '99.15', nama: 'Imunisasi/Injeksi Vaksin', tarif: 45000 },
-      ]
-    },
-    {
-      kodePoli: 'LAB',
-      namaPoli: 'Laboratorium',
-      layanans: [
-        { kode: '90.59', nama: 'Pemeriksaan Darah Lengkap', tarif: 65000 },
-        { kode: '91.46', nama: 'Pemeriksaan Urinalisis', tarif: 35000 },
-      ]
-    },
-    {
-      kodePoli: 'REHAB',
-      namaPoli: 'Rehabilitasi Medik',
-      layanans: [
-        { kode: '93.11', nama: 'Latihan Fisioterapi', tarif: 120000 },
-      ]
-    },
-    {
-      kodePoli: 'INAP',
-      namaPoli: 'Rawat Inap / Terapi Lainnya',
-      layanans: [
-        { kode: '99.04', nama: 'Transfusi Darah', tarif: 350000 },
+        { kode: '23.20', nama: 'Tumpatan Gigi (Tambal)', tarif: 200000 },
       ]
     }
   ];
@@ -896,21 +1072,15 @@ async function main() {
       create: {
         kodePoli: poliData.kodePoli,
         namaPoli: poliData.namaPoli,
-        deskripsi: poliData.namaPoli,
+        deskripsi: `Layanan untuk ${poliData.namaPoli}`,
         statusAktif: true
       }
     });
 
-    console.log(`Upserted Poli: ${poli.namaPoli}`);
-
     for (const lay of poliData.layanans) {
       await prisma.layananKlinik.upsert({
         where: { kodeLayanan: lay.kode },
-        update: {
-          namaLayanan: lay.nama,
-          tarifDasar: lay.tarif,
-          poliklinikId: poli.id
-        },
+        update: { namaLayanan: lay.nama, tarifDasar: lay.tarif },
         create: {
           kodeLayanan: lay.kode,
           namaLayanan: lay.nama,
@@ -922,34 +1092,47 @@ async function main() {
       });
     }
 
-    const dokterUsername = `dokter_${poliData.kodePoli.toLowerCase()}`;
+    const dokterUsername = `dr_${poliData.kodePoli.toLowerCase()}`;
     await prisma.user.upsert({
       where: { username: dokterUsername },
       update: {},
       create: {
         username: dokterUsername,
         password: passwordHash,
-        namaLengkap: `Dr. ${poliData.namaPoli} untuk Poli ${poliData.kodePoli}`,
+        namaLengkap: `Dr. ${poliData.namaPoli}`,
         role: 'DOKTER',
         poliklinikId: poli.id
       }
     });
-    console.log(`Upserted Dokter: Dr. ${poliData.namaPoli} untuk Poli ${poliData.kodePoli}`);
-
-    const perawatUsername = `perawat_${poliData.kodePoli.toLowerCase()}`;
-    await prisma.user.upsert({
-      where: { username: perawatUsername },
-      update: {},
-      create: {
-        username: perawatUsername,
-        password: passwordHash,
-        namaLengkap: `Perawat ${poliData.namaPoli} untuk Poli ${poliData.kodePoli}`,
-        role: 'PERAWAT',
-        poliklinikId: poli.id
-      }
-    });
-    console.log(`Upserted Perawat: Perawat ${poliData.namaPoli} untuk Poli ${poliData.kodePoli}`);
   }
+  console.log('✅ Poliklinik & Layanan berhasil di-seed.');
+
+  const dummyPatients = [
+    {
+      noRM: 'RM-000001', nik: '3201010101900001', noIHS: 'P10000000001',
+      namaLengkap: 'Bapak Rahmat Susanto', tempatLahir: 'Jakarta', tanggalLahir: new Date('1980-05-15'),
+      jenisKelamin: 'Laki-laki', agama: 'Islam', pekerjaan: 'Wiraswasta', statusPerkawinan: 'Menikah', kewarganegaraan: 'WNI'
+    },
+    {
+      noRM: 'RM-000002', nik: '3201010101900002', noIHS: 'P10000000002',
+      namaLengkap: 'Ibu Siti Aminah', tempatLahir: 'Bandung', tanggalLahir: new Date('1995-08-22'),
+      jenisKelamin: 'Perempuan', agama: 'Islam', pekerjaan: 'Ibu Rumah Tangga', statusPerkawinan: 'Menikah', kewarganegaraan: 'WNI'
+    },
+    {
+      noRM: 'RM-000003', nik: '3201010101900003', noIHS: 'P10000000003',
+      namaLengkap: 'Bayi Dilan', tempatLahir: 'Surabaya', tanggalLahir: new Date('2023-10-10'),
+      jenisKelamin: 'Laki-laki', agama: 'Islam', pekerjaan: 'Belum Bekerja', statusPerkawinan: 'Belum Kawin', kewarganegaraan: 'WNI'
+    }
+  ];
+
+  for (const pasien of dummyPatients) {
+    await prisma.pasien.upsert({
+      where: { nik: pasien.nik },
+      update: {},
+      create: { ...pasien }
+    });
+  }
+  console.log('✅ Data Pasien Dummy berhasil di-seed.');
 
   const programs = [
     { kode: 'HIV', nama: 'Program HIV/AIDS' },
@@ -962,33 +1145,108 @@ async function main() {
     await prisma.programUKM.upsert({
       where: { kodeProgram: prog.kode },
       update: {},
+      create: { kodeProgram: prog.kode, namaProgram: prog.nama, deskripsi: prog.nama }
+    });
+  }
+
+  const masterObatData = [
+    { kodeObat: 'OBT-ARV', namaObat: 'Obat ARV (Anti Retroviral)', kategori: 'Antiviral', sediaan: 'Tablet', stok: 1000, harga: 0 },
+    { kodeObat: 'OBT-OAT', namaObat: 'OAT (Obat Anti Tuberkulosis) FDC', kategori: 'Antibiotik', sediaan: 'Tablet', stok: 500, harga: 0 },
+    { kodeObat: 'OBT-001', namaObat: 'Paracetamol 500mg', kategori: 'Obat Bebas', sediaan: 'Tablet', stok: 2000, harga: 5000 },
+    { kodeObat: 'OBT-002', namaObat: 'Amoxicillin 500mg', kategori: 'Antibiotik Keras', sediaan: 'Kapsul', stok: 1500, harga: 15000 },
+    { kodeObat: 'OBT-003', namaObat: 'Amlodipine 5mg', kategori: 'Obat Keras (Hipertensi)', sediaan: 'Tablet', stok: 800, harga: 12000 },
+    { kodeObat: 'OBT-004', namaObat: 'Metformin 500mg', kategori: 'Obat Keras (Diabetes)', sediaan: 'Tablet', stok: 1200, harga: 10000 },
+  ];
+
+  for (const obat of masterObatData) {
+    await prisma.masterObat.upsert({
+      where: { kodeObat: obat.kodeObat },
+      update: { stok: obat.stok, harga: obat.harga },
+      create: { ...obat }
+    });
+  }
+  console.log('✅ Master Obat berhasil di-seed.');
+
+  const icd10Data = [
+
+    { kode_icd10: 'A15.0', nama_diagnosis: 'Tuberkulosis paru, terkonfirmasi', kategori: 'Tuberkulosis', wajib_lapor: true, kode_program: 'TB' },
+    { kode_icd10: 'B20', nama_diagnosis: 'Penyakit infeksi HIV', kategori: 'HIV/AIDS', wajib_lapor: true, kode_program: 'HIV' },
+    { kode_icd10: 'Z34', nama_diagnosis: 'Pengawasan kehamilan normal', kategori: 'Kehamilan', wajib_lapor: false, kode_program: 'KIA' },
+
+    { kode_icd10: 'J06.9', nama_diagnosis: 'Infeksi Saluran Pernapasan Akut (ISPA)', kategori: 'Pernapasan', wajib_lapor: false, kode_program: null },
+    { kode_icd10: 'I10', nama_diagnosis: 'Hipertensi Esensial (Primer)', kategori: 'Kardiovaskular', wajib_lapor: false, kode_program: null },
+    { kode_icd10: 'E11.9', nama_diagnosis: 'Diabetes Melitus Tipe 2', kategori: 'Endokrin', wajib_lapor: false, kode_program: null },
+    { kode_icd10: 'A09', nama_diagnosis: 'Diare dan Gastroenteritis', kategori: 'Pencernaan', wajib_lapor: false, kode_program: null },
+    { kode_icd10: 'K30', nama_diagnosis: 'Dispepsia (Maag)', kategori: 'Pencernaan', wajib_lapor: false, kode_program: null },
+  ];
+
+  for (const data of icd10Data) {
+    await prisma.masterICD10.upsert({
+      where: { kode_icd10: data.kode_icd10 },
+      update: { nama_diagnosis: data.nama_diagnosis, kode_program: data.kode_program },
+      create: { ...data, status_aktif: true }
+    });
+  }
+  console.log('✅ Master ICD-10 berhasil di-seed.');
+
+  const labData = [
+    { kategori: 'Hematologi', parameter: 'Hemoglobin (Hb)', satuan: 'g/dL', nilaiRujukan: '12.0 - 16.0' },
+    { kategori: 'Kimia Klinik', parameter: 'Gula Darah Sewaktu (GDS)', satuan: 'mg/dL', nilaiRujukan: '< 200' },
+    { kategori: 'Kimia Klinik', parameter: 'Kolesterol Total', satuan: 'mg/dL', nilaiRujukan: '< 200' },
+    { kategori: 'Kimia Klinik', parameter: 'Asam Urat', satuan: 'mg/dL', nilaiRujukan: '3.4 - 7.0' },
+  ];
+
+  for (const lab of labData) {
+    await prisma.masterLaboratorium.createMany({
+      data: lab,
+      skipDuplicates: true,
+    });
+  }
+
+  const modalities = [
+    { kode: 'DX', nama: 'Digital Radiography (X-Ray)' },
+    { kode: 'CT', nama: 'Computed Tomography (CT Scan)' },
+    { kode: 'US', nama: 'Ultrasound (USG)' },
+  ];
+
+  for (const mod of modalities) {
+    await prisma.masterModality.upsert({
+      where: { kodeDicom: mod.kode },
+      update: {},
+      create: { kodeDicom: mod.kode, namaModality: mod.nama, statusAktif: true }
+    });
+  }
+
+  const masterVaksins = [
+    { kodeKfa: '93001282', nama: 'Vaksin COVID-19 (Sinovac)', targetPenyakit: 'COVID-19' },
+    { kodeKfa: '93000601', nama: 'Vaksin BCG', targetPenyakit: 'TBC' },
+    { kodeKfa: '93000862', nama: 'Vaksin DPT-HB-Hib (Pentabio)', targetPenyakit: 'Difteri, Pertusis' },
+    { kodeKfa: '93000282', nama: 'Vaksin Polio Tetes (bOPV)', targetPenyakit: 'Polio' }
+  ];
+
+  for (const vak of masterVaksins) {
+    const vaksinRecord = await prisma.masterVaksin.upsert({
+      where: { kodeKfa: vak.kodeKfa },
+      update: {},
+      create: { kodeKfa: vak.kodeKfa, namaVaksin: vak.nama, targetPenyakit: vak.targetPenyakit, statusAktif: true }
+    });
+
+    const dummyBatchNo = `BATCH-${vak.kodeKfa}-2024`;
+    await prisma.batchVaksin.upsert({
+      where: { vaksinId_noBatch: { vaksinId: vaksinRecord.id, noBatch: dummyBatchNo } },
+      update: { stok: 100 },
       create: {
-        kodeProgram: prog.kode,
-        namaProgram: prog.nama,
-        deskripsi: prog.nama
+        vaksinId: vaksinRecord.id,
+        noBatch: dummyBatchNo,
+        tanggalExpired: new Date('2027-12-31T23:59:59.000Z'),
+        stok: 100,
+        statusAktif: true
       }
     });
-    console.log(`Upserted Program UKM: ${prog.nama}`);
   }
+  console.log('✅ Modul Radiologi & Imunisasi berhasil di-seed.');
 
-  const obatARV = await prisma.masterObat.findFirst({
-    where: { kodeObat: 'OBT-ARV' }
-  });
-  if (!obatARV) {
-    await prisma.masterObat.create({
-      data: {
-        kodeObat: 'OBT-ARV',
-        namaObat: 'Obat ARV (Anti Retroviral)',
-        kategori: 'Antiviral',
-        sediaan: 'Tablet',
-        stok: 1000,
-        harga: 0
-      }
-    });
-    console.log(`Created MasterObat: Obat ARV`);
-  }
-
-  console.log('Seeding finished.');
+  console.log('🎉 SEEDING SELESAI! Database siap digunakan untuk simulasi nyata.');
 }
 
 main()
@@ -1066,6 +1324,56 @@ async function main() {
   console.log(`Username : ${adminUser.username}`);
   console.log('Password : admin123');
   console.log(`Role     : ${adminUser.role}`);
+}
+
+main()
+  .catch((e) => {
+    console.error(e);
+    process.exit(1);
+  })
+  .finally(async () => {
+    await prisma.$disconnect();
+  });
+
+--- FILE: prisma\seeders\seed-alergi.js ---
+const { PrismaClient } = require('@prisma/client');
+const prisma = new PrismaClient();
+
+const masterAlergiData = [
+
+  { kode_snomed: '91935009', nama_alergi: 'Alergi Kacang (Peanut)', kategori: 'food', status_aktif: true },
+  { kode_snomed: '417532002', nama_alergi: 'Alergi Makanan Laut (Seafood)', kategori: 'food', status_aktif: true },
+  { kode_snomed: '91930004', nama_alergi: 'Alergi Telur (Egg)', kategori: 'food', status_aktif: true },
+  { kode_snomed: '425525006', nama_alergi: 'Alergi Susu Sapi (Cow\'s Milk)', kategori: 'food', status_aktif: true },
+
+  { kode_snomed: '256277009', nama_alergi: 'Alergi Tungau Debu Rumah', kategori: 'environment', status_aktif: true },
+  { kode_snomed: '256278004', nama_alergi: 'Alergi Bulu Kucing', kategori: 'environment', status_aktif: true },
+  { kode_snomed: '1157263004', nama_alergi: 'Alergi Cuaca Dingin', kategori: 'environment', status_aktif: true },
+
+  { kode_snomed: '91000101', nama_alergi: 'Paracetamol (KFA)', kategori: 'medication', status_aktif: true },
+  { kode_snomed: '91000343', nama_alergi: 'Amoxicillin (KFA)', kategori: 'medication', status_aktif: true },
+  { kode_snomed: '91000125', nama_alergi: 'Ibuprofen (KFA)', kategori: 'medication', status_aktif: true }
+];
+
+async function main() {
+  console.log('Memulai seeder Master Alergi...');
+
+  for (const item of masterAlergiData) {
+    const existing = await prisma.masterAlergi.findUnique({
+      where: { kode_snomed: item.kode_snomed }
+    });
+
+    if (!existing) {
+      await prisma.masterAlergi.create({
+        data: item
+      });
+      console.log(`✅ Berhasil menambahkan: ${item.nama_alergi}`);
+    } else {
+      console.log(`⚠️ Melewati: ${item.nama_alergi} (Sudah ada)`);
+    }
+  }
+
+  console.log('Seeder Master Alergi selesai!');
 }
 
 main()
@@ -1450,8 +1758,13 @@ app.use((req, res, next) => {
 
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
+const monitoringRoutes = require('./routes/monitoring.routes');
+const masterAlergiRoutes = require('./routes/masterAlergi.routes');
+
 app.use('/api', routes);
 app.use('/api/dokter', dokterRoutes);
+app.use('/api/satusehat-monitoring', monitoringRoutes);
+app.use('/api/master-alergi', masterAlergiRoutes);
 
 app.get('/', (req, res) => {
   res.json({ message: 'Welcome to Kesehatan API' });
@@ -1465,12 +1778,63 @@ app.use(errorHandler);
 
 module.exports = app;
 
+--- FILE: src\config\bpjs.js ---
+require('dotenv').config();
+
+const BPJS_ENV = process.env.BPJS_ENV || 'sandbox';
+
+const BPJS_URL = {
+  sandbox: {
+    BASE_URL: 'https://apijkn-dev.bpjs-kesehatan.go.id/pcare-rest-dev/webresources',
+  },
+  production: {
+    BASE_URL: 'https://apijkn.bpjs-kesehatan.go.id/pcare-rest/webresources',
+  },
+};
+
+module.exports = {
+  BPJS_CONS_ID: process.env.BPJS_CONS_ID,
+  BPJS_SECRET_KEY: process.env.BPJS_SECRET_KEY,
+  BPJS_USER_KEY: process.env.BPJS_USER_KEY,
+  BPJS_KODE_FASKES: process.env.BPJS_KODE_FASKES,
+  BPJS_BASE_URL: BPJS_URL[BPJS_ENV].BASE_URL,
+  IS_SANDBOX: BPJS_ENV === 'sandbox',
+};
+
 --- FILE: src\config\prisma.js ---
 const { PrismaClient } = require('@prisma/client');
 
 const prisma = new PrismaClient();
 
 module.exports = prisma;
+
+--- FILE: src\config\satusehat.js ---
+require('dotenv').config();
+
+const SATUSEHAT_ENV = process.env.SATUSEHAT_ENV || 'sandbox';
+
+const SATUSEHAT_CONFIG = {
+  sandbox: {
+    AUTH_URL: 'https://api-satusehat-stg.dto.kemkes.go.id/oauth2/v1',
+    FHIR_URL: 'https://api-satusehat-stg.dto.kemkes.go.id/fhir-r4/v1',
+    CONSENT_URL: 'https://api-satusehat-stg.dto.kemkes.go.id/consent/v1',
+    KFA_URL: 'https://api-satusehat-stg.dto.kemkes.go.id/kfa-v2',
+  },
+  production: {
+    AUTH_URL: 'https://api-satusehat.kemkes.go.id/oauth2/v1',
+    FHIR_URL: 'https://api-satusehat.kemkes.go.id/fhir-r4/v1',
+    CONSENT_URL: 'https://api-satusehat.kemkes.go.id/consent/v1',
+    KFA_URL: 'https://api-satusehat.kemkes.go.id/kfa-v2',
+  }
+};
+
+module.exports = {
+  SATUSEHAT_ORG_ID: process.env.SATUSEHAT_ORG_ID,
+  SATUSEHAT_CLIENT_ID: process.env.SATUSEHAT_CLIENT_ID,
+  SATUSEHAT_CLIENT_SECRET: process.env.SATUSEHAT_CLIENT_SECRET,
+  SATUSEHAT_URL: SATUSEHAT_CONFIG[SATUSEHAT_ENV],
+  IS_SANDBOX: SATUSEHAT_ENV === 'sandbox'
+};
 
 --- FILE: src\controllers\auth.controller.js ---
 const authService = require('../services/auth.service');
@@ -1514,6 +1878,120 @@ const getMe = async (req, res, next) => {
 module.exports = {
   login,
   getMe,
+};
+
+--- FILE: src\controllers\bpjs.controller.js ---
+'use strict';
+
+const PCareService = require('../services/bpjs/pcare.service');
+const prisma = require('../config/prisma');
+const bpjsConfig = require('../config/bpjs');
+
+const cekPeserta = async (req, res, next) => {
+  try {
+    const { noBpjs } = req.params;
+
+    if (!noBpjs || noBpjs.length < 13) {
+      const err = new Error('Nomor BPJS tidak valid (minimal 13 digit).');
+      err.statusCode = 400;
+      return next(err);
+    }
+
+    PCareService.validateConfig();
+
+    const pesertaData = await PCareService.cekPesertaByNoKartu(noBpjs);
+
+    return res.status(200).json({
+      success: true,
+      message: `Peserta ditemukan. Status: ${pesertaData.statusLabel}`,
+      data: pesertaData,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const syncKunjungan = async (req, res, next) => {
+  try {
+    const { kunjunganId } = req.params;
+
+    const kunjungan = await prisma.kunjungan.findUnique({
+      where: { id: kunjunganId },
+      include: {
+        pasien: {
+          include: { penjamin: true },
+        },
+        poliklinik: true,
+      },
+    });
+
+    if (!kunjungan) {
+      const err = new Error('Data Kunjungan tidak ditemukan.');
+      err.statusCode = 404;
+      return next(err);
+    }
+
+    if (kunjungan.pasien?.penjamin?.jenisPenjamin !== 'BPJS' &&
+        kunjungan.pasien?.penjamin?.jenisPenjamin !== 'BPJS Kesehatan') {
+      const err = new Error('Kunjungan ini bukan pasien BPJS, tidak perlu disinkronkan.');
+      err.statusCode = 400;
+      return next(err);
+    }
+
+    if (kunjungan.statusKlaimBpjs === 'TERKIRIM') {
+      return res.status(200).json({
+        success: true,
+        message: 'Kunjungan ini sudah berhasil dikirim ke PCare BPJS sebelumnya.',
+        data: { noKunjunganPcare: kunjungan.noKunjunganPcare, statusKlaimBpjs: kunjungan.statusKlaimBpjs },
+      });
+    }
+
+    PCareService.validateConfig();
+
+    const tglDaftar = new Date(kunjungan.tanggalRegistrasi).toISOString().split('T')[0];
+
+    const pcareResult = await PCareService.daftarkanKunjungan({
+      noBpjs: kunjungan.pasien.penjamin.noBpjs,
+      tanggalRegistrasi: tglDaftar,
+      kdPoliTujuan: kunjungan.poliklinik?.kodePoli || kunjungan.poliklinikId,
+      noRM: kunjungan.pasien.noRM,
+    });
+
+    const updatedKunjungan = await prisma.kunjungan.update({
+      where: { id: kunjunganId },
+      data: {
+        noKunjunganPcare: pcareResult.noKunjungan,
+        noUrutPcare: pcareResult.noUrut?.toString(),
+        statusKlaimBpjs: 'TERKIRIM',
+      },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: `Berhasil sinkronisasi ke BPJS PCare. No. Kunjungan: ${pcareResult.noKunjungan}`,
+      data: {
+        noKunjunganPcare: updatedKunjungan.noKunjunganPcare,
+        noUrutPcare: updatedKunjungan.noUrutPcare,
+        statusKlaimBpjs: updatedKunjungan.statusKlaimBpjs,
+      },
+    });
+  } catch (error) {
+
+    try {
+      await prisma.kunjungan.update({
+        where: { id: req.params.kunjunganId },
+        data: { statusKlaimBpjs: 'GAGAL' },
+      });
+    } catch (_) {
+
+    }
+    next(error);
+  }
+};
+
+module.exports = {
+  cekPeserta,
+  syncKunjungan,
 };
 
 --- FILE: src\controllers\dokter.controller.js ---
@@ -1571,6 +2049,7 @@ exports.deleteDokter = async (req, res) => {
 --- FILE: src\controllers\farmasi.controller.js ---
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
+const satusehatService = require('../services/satusehat.service');
 
 exports.getAntrianFarmasi = async (req, res) => {
   try {
@@ -1583,7 +2062,10 @@ exports.getAntrianFarmasi = async (req, res) => {
         dokter: true,
         kunjungan: {
           include: {
-            poliklinik: true
+            poliklinik: true,
+            tagihan: {
+              select: { statusTagihan: true }
+            }
           }
         },
         details: {
@@ -1617,7 +2099,10 @@ exports.getResepById = async (req, res) => {
         dokter: true,
         kunjungan: {
           include: {
-            poliklinik: true
+            poliklinik: true,
+            tagihan: {
+              select: { statusTagihan: true }
+            }
           }
         },
         details: {
@@ -1650,7 +2135,16 @@ exports.prosesResep = async (req, res) => {
 
       const resep = await tx.resep.findUnique({
         where: { id },
-        include: { details: true, kunjungan: true }
+        include: {
+          details: {
+            include: { obat: true }
+          },
+          kunjungan: {
+            include: { poliklinik: true }
+          },
+          pasien: true,
+          dokter: { include: { tenagaMedis: true } }
+        }
       });
 
       if (!resep) {
@@ -1691,16 +2185,60 @@ exports.prosesResep = async (req, res) => {
 
       await tx.kunjungan.update({
         where: { id: resep.kunjunganId },
-        data: { statusKunjungan: 'MENUNGGU_KASIR' }
+        data: { statusKunjungan: 'SELESAI' }
       });
 
-      return updatedResep;
+      return { updatedResep, resepLengkap: resep };
     });
+
+    const resep = result.resepLengkap;
+    let medCount = 0;
+    for (const detail of resep.details) {
+      if (detail.obat && detail.obat.kodeObat && resep.kunjungan.encounterId && resep.pasien.noIHS && resep.dokter.tenagaMedis?.noIHS) {
+        try {
+          await satusehatService.postMedicationDispense({
+            resepId: resep.id,
+            resepDetailId: `${resep.id}-${detail.obat.id}`,
+            kodeObat: detail.obat.kodeObat,
+            namaObat: detail.obat.namaObat,
+            sediaan: detail.obat.sediaan,
+            pasienIhs: resep.pasien.noIHS,
+            pasienName: resep.pasien.namaLengkap,
+            practitionerIhs: resep.dokter.tenagaMedis.noIHS,
+            practitionerName: resep.dokter.namaLengkap,
+            encounterId: resep.kunjungan.encounterId,
+            locationId: resep.kunjungan.poliklinik.ihsLocationId,
+            locationName: resep.kunjungan.poliklinik.namaPoli,
+            jumlah: detail.jumlah,
+            jumlahHari: 3,
+            instruksi: detail.aturanPakai,
+            frekuensi: 3,
+            dosis: 1
+          });
+          medCount++;
+        } catch (err) {
+          console.error(`Error sync MedicationDispense SATUSEHAT untuk Obat ${detail.obat.kodeObat}:`, err.message);
+        }
+      }
+    }
+
+    if (medCount > 0) {
+      const syncStatus = (typeof resep.kunjungan.satusehatSync === 'object' && resep.kunjungan.satusehatSync !== null)
+        ? { ...resep.kunjungan.satusehatSync }
+        : {};
+
+      syncStatus.MedicationDispense = { status: 'SUCCESS', detail: `Sent ${medCount} dispenses` };
+
+      await prisma.kunjungan.update({
+        where: { id: resep.kunjunganId },
+        data: { satusehatSync: syncStatus }
+      });
+    }
 
     res.json({
       status: 'success',
       message: 'Resep berhasil diproses, stok obat telah dikurangi, dan pasien diarahkan ke Kasir.',
-      data: result
+      data: result.updatedResep
     });
   } catch (error) {
     console.error('Error in prosesResep:', error);
@@ -1961,6 +2499,114 @@ module.exports = {
   deleteICD9
 };
 
+--- FILE: src\controllers\imunisasi.controller.js ---
+const imunisasiService = require('../services/imunisasi.service');
+const SatuSehatMapper = require('../services/satusehat/imunisasi.mapper');
+const SatuSehatGateway = require('../services/satusehat/gateway.service');
+const prisma = require('../config/prisma');
+
+const imunisasiController = {
+
+    getMasterVaksin: async (req, res, next) => {
+        try {
+            const data = await imunisasiService.getAllMasterVaksin();
+            res.status(200).json({ success: true, data });
+        } catch (error) {
+            next(error);
+        }
+    },
+
+    getBatchVaksin: async (req, res, next) => {
+        try {
+            const { vaksinId } = req.params;
+            const data = await imunisasiService.getBatchByVaksin(vaksinId);
+            res.status(200).json({ success: true, data });
+        } catch (error) {
+            next(error);
+        }
+    },
+
+    catatRiwayat: async (req, res, next) => {
+        try {
+
+            const petugasId = req.user?.id;
+
+            const riwayat = await imunisasiService.catatRiwayat(req.body, petugasId);
+
+            res.status(201).json({
+                success: true,
+                message: 'Data riwayat imunisasi berhasil dicatat.',
+                data: riwayat,
+            });
+        } catch (error) {
+            next(error);
+        }
+    },
+
+    getRiwayatPasien: async (req, res, next) => {
+        try {
+            const { pasienId } = req.params;
+            const data = await imunisasiService.getRiwayatByPasien(pasienId);
+            res.status(200).json({ success: true, data });
+        } catch (error) {
+            next(error);
+        }
+    },
+
+    syncKeSatuSehat: async (req, res, next) => {
+        try {
+            const { id } = req.params;
+
+            const dataLokal = await imunisasiService.getRiwayatLengkapById(id);
+
+            if (!dataLokal) {
+                return res.status(404).json({ success: false, message: 'Data riwayat imunisasi tidak ditemukan.' });
+            }
+
+            if (!dataLokal.pasien.persetujuan?.persetujuanSatusehat) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'DITOLAK: Pasien (atau wali) belum memberikan persetujuan pengiriman data ke SATUSEHAT.',
+                });
+            }
+
+            const fhirPayload = SatuSehatMapper.toImmunization(dataLokal);
+
+            const satusehatResponse = await SatuSehatGateway.postResource('Immunization', fhirPayload);
+
+            const updatedRiwayat = await prisma.riwayatImunisasi.update({
+                where: { id: id },
+                data: {
+                    satusehatId: satusehatResponse.id
+                }
+            });
+
+            res.status(200).json({
+                success: true,
+                message: 'Berhasil sinkronisasi data Imunisasi ke SATUSEHAT.',
+                data: {
+                    idLokal: updatedRiwayat.id,
+                    satusehatId: updatedRiwayat.satusehatId,
+                }
+            });
+
+        } catch (error) {
+
+            if (error.details) {
+                return res.status(error.statusCode || 400).json({
+                    success: false,
+                    message: error.message,
+                    satusehat_error: error.details
+                });
+            }
+            next(error);
+        }
+    }
+
+};
+
+module.exports = imunisasiController;
+
 --- FILE: src\controllers\kasir.controller.js ---
 const kasirService = require('../services/kasir.service');
 
@@ -2146,10 +2792,73 @@ const getKunjunganById = async (req, res, next) => {
   }
 };
 
+const updateStatusKunjungan = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    if (!status) {
+      const error = new Error('Property "status" wajib dikirimkan dalam body request.');
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const result = await kunjunganService.updateStatusKunjungan(id, status);
+
+    res.status(200).json({
+      success: true,
+      message: `Status antrian berhasil diperbarui menjadi: ${status}`,
+      data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const getDashboardStats = async (req, res, next) => {
+  try {
+    const data = await kunjunganService.getDashboardStats();
+    res.status(200).json({
+      success: true,
+      data: data,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const getPerawatDashboardStats = async (req, res, next) => {
+  try {
+    const data = await kunjunganService.getPerawatDashboardStats(req.user);
+    res.status(200).json({
+      success: true,
+      data: data,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const getDokterDashboardStats = async (req, res, next) => {
+  try {
+    const data = await kunjunganService.getDokterDashboardStats(req.user);
+    res.status(200).json({
+      success: true,
+      data: data,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getKunjunganScreening,
   panggilKunjungan,
   getKunjunganById,
+  updateStatusKunjungan,
+  getDashboardStats,
+  getPerawatDashboardStats,
+  getDokterDashboardStats,
 };
 
 --- FILE: src\controllers\laboratorium.controller.js ---
@@ -2295,6 +3004,154 @@ module.exports = {
   createMasterObat,
   updateMasterObat,
   deleteMasterObat,
+};
+
+--- FILE: src\controllers\masterAlergi.controller.js ---
+const masterAlergiService = require('../services/masterAlergi.service');
+const satusehatService = require('../services/satusehat.service');
+
+exports.getAllAlergi = async (req, res) => {
+  try {
+    const alergi = await masterAlergiService.getAllAlergi();
+    res.json(alergi);
+  } catch (error) {
+    console.error('Error fetching master alergi:', error);
+    res.status(500).json({ error: 'Terjadi kesalahan pada server' });
+  }
+};
+
+exports.createAlergi = async (req, res) => {
+  try {
+    const newAlergi = await masterAlergiService.createAlergi(req.body);
+    res.status(201).json(newAlergi);
+  } catch (error) {
+    if (error.statusCode === 400) {
+      return res.status(400).json({ error: error.message });
+    }
+    console.error('Error creating master alergi:', error);
+    res.status(500).json({ error: 'Terjadi kesalahan pada server' });
+  }
+};
+
+exports.updateAlergi = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updated = await masterAlergiService.updateAlergi(id, req.body);
+    res.json(updated);
+  } catch (error) {
+    console.error('Error updating master alergi:', error);
+    res.status(500).json({ error: 'Terjadi kesalahan pada server' });
+  }
+};
+
+exports.deleteAlergi = async (req, res) => {
+  try {
+    const { id } = req.params;
+    await masterAlergiService.deleteAlergi(id);
+    res.json({ message: 'Master Alergi berhasil dihapus' });
+  } catch (error) {
+    console.error('Error deleting master alergi:', error);
+    res.status(500).json({ error: 'Terjadi kesalahan pada server' });
+  }
+};
+
+exports.searchKfa = async (req, res) => {
+  try {
+    const { keyword } = req.query;
+    if (!keyword || keyword.length < 3) {
+      return res.status(400).json({ error: 'Keyword minimal 3 karakter' });
+    }
+    const result = await satusehatService.searchKFA(keyword);
+    res.json(result);
+  } catch (error) {
+    console.error('Error searching KFA:', error);
+    res.status(500).json({ error: 'Gagal mencari data KFA' });
+  }
+};
+
+--- FILE: src\controllers\monitoring.controller.js ---
+const { PrismaClient } = require('@prisma/client');
+const prisma = new PrismaClient();
+
+const getMonitoringData = async (req, res, next) => {
+  try {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const kunjungans = await prisma.kunjungan.findMany({
+      where: {
+        createdAt: {
+          gte: today,
+        },
+      },
+      include: {
+        pasien: true,
+        dokterTujuan: true,
+        screening: true,
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+    });
+
+    const formattedData = kunjungans.map((k) => {
+
+      const syncStatus = k.satusehatSync || {};
+
+      const hasObservationLegacy = k.screening && Array.isArray(k.screening.observationIds) && k.screening.observationIds.length > 0;
+
+      const modules = [
+        { name: 'Encounter', status: syncStatus.Encounter?.status || (k.encounterId ? 'SUCCESS' : 'PENDING'), detail: k.encounterId || null },
+        {
+          name: 'Observation',
+          status: syncStatus.Observation?.status || (hasObservationLegacy ? 'SUCCESS' : 'PENDING'),
+          detail: syncStatus.Observation?.detail || (hasObservationLegacy ? `Sent ${k.screening.observationIds.length} observations` : null)
+        },
+        { name: 'Condition', status: syncStatus.Condition?.status || 'PENDING', detail: syncStatus.Condition?.detail || null },
+        { name: 'Procedure', status: syncStatus.Procedure?.status || 'PENDING', detail: syncStatus.Procedure?.detail || null },
+        { name: 'Composition', status: syncStatus.Composition?.status || 'PENDING', detail: null },
+        { name: 'Medication', status: syncStatus.Medication?.status || 'PENDING', detail: syncStatus.Medication?.detail || null },
+        { name: 'MedicationRequest', status: syncStatus.MedicationRequest?.status || 'PENDING', detail: syncStatus.MedicationRequest?.detail || null },
+        { name: 'MedicationDispense', status: syncStatus.MedicationDispense?.status || 'PENDING', detail: null },
+        {
+          name: 'AllergyIntolerance',
+          status: (Array.isArray(syncStatus.allergy) && syncStatus.allergy.length > 0) ? 'SUCCESS' : 'PENDING',
+          detail: (Array.isArray(syncStatus.allergy) && syncStatus.allergy.length > 0) ? `Sent ${syncStatus.allergy.length} allergies` : null
+        },
+        { name: 'ImagingStudy', status: syncStatus.ImagingStudy?.status || 'PENDING', detail: null },
+        { name: 'ServiceRequest', status: syncStatus.ServiceRequest?.status || 'PENDING', detail: null },
+        { name: 'ClinicalImpression', status: syncStatus.ClinicalImpression?.status || 'PENDING', detail: null },
+        { name: 'Immunization', status: syncStatus.Immunization?.status || 'PENDING', detail: null },
+        { name: 'QuestionnaireResponse', status: syncStatus.QuestionnaireResponse?.status || 'PENDING', detail: null },
+        { name: 'MedicationStatement', status: syncStatus.MedicationStatement?.status || 'PENDING', detail: null },
+        { name: 'CarePlan', status: syncStatus.CarePlan?.status || 'PENDING', detail: null },
+        { name: 'Specimen', status: syncStatus.Specimen?.status || 'PENDING', detail: null },
+        { name: 'DiagnosticReport', status: syncStatus.DiagnosticReport?.status || 'PENDING', detail: null },
+        { name: 'EpisodeOfCare', status: syncStatus.EpisodeOfCare?.status || 'PENDING', detail: null }
+      ];
+
+      return {
+        id: k.id,
+        pasienName: k.pasien?.namaLengkap,
+        noRm: k.pasien?.noRM,
+        dokterName: k.dokterTujuan?.namaLengkap,
+        statusKunjungan: k.statusKunjungan,
+        waktuDaftar: k.createdAt,
+        modules: modules,
+      };
+    });
+
+    res.json({
+      success: true,
+      data: formattedData,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+module.exports = {
+  getMonitoringData,
 };
 
 --- FILE: src\controllers\pasien.controller.js ---
@@ -2490,6 +3347,129 @@ module.exports = {
   updatePerusahaan
 };
 
+--- FILE: src\controllers\radiologi.controller.js ---
+const radiologiService = require('../services/radiologi.service');
+const SatuSehatMapper = require('../services/satusehat/mapper.service');
+const SatuSehatGateway = require('../services/satusehat/gateway.service');
+const prisma = require('../config/prisma');
+
+const radiologiController = {
+
+    createOrder: async (req, res, next) => {
+        try {
+
+            const dokterId = req.user?.id || req.body.dokterId;
+            const data = { ...req.body, dokterId };
+
+            const order = await radiologiService.createOrder(data);
+
+            res.status(201).json({
+                success: true,
+                message: 'Order radiologi berhasil dibuat',
+                data: order,
+            });
+        } catch (error) {
+            next(error);
+        }
+    },
+
+    getAntrian: async (req, res, next) => {
+        try {
+            const antrian = await radiologiService.getAntrianRadiologi();
+            res.status(200).json({
+                success: true,
+                data: antrian,
+            });
+        } catch (error) {
+            next(error);
+        }
+    },
+
+    prosesPemeriksaan: async (req, res, next) => {
+        try {
+            const { orderId } = req.params;
+            const pemeriksaan = await radiologiService.prosesPemeriksaan(orderId, req.body);
+
+            res.status(200).json({
+                success: true,
+                message: 'Pemeriksaan radiologi sedang diproses',
+                data: pemeriksaan,
+            });
+        } catch (error) {
+            next(error);
+        }
+    },
+
+    simpanEkspertise: async (req, res, next) => {
+        try {
+            const { pemeriksaanId } = req.params;
+            const dokterPembacaId = req.user?.id || req.body.dokterPembacaId;
+
+            const hasil = await radiologiService.simpanEkspertise(pemeriksaanId, dokterPembacaId, req.body);
+
+            res.status(200).json({
+                success: true,
+                message: 'Hasil ekspertise berhasil disimpan',
+                data: hasil,
+            });
+        } catch (error) {
+            next(error);
+        }
+    },
+
+    syncKeSatuSehat: async (req, res, next) => {
+        try {
+            const { pemeriksaanId } = req.params;
+
+            const dataLokal = await radiologiService.getPemeriksaanLengkapById(pemeriksaanId);
+            if (!dataLokal) {
+                return res.status(404).json({ success: false, message: 'Data pemeriksaan tidak ditemukan' });
+            }
+
+            if (!dataLokal.kunjungan.persetujuan?.persetujuanSatusehat) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'DITOLAK: Pasien tidak memberikan persetujuan pengiriman data ke SATUSEHAT.',
+                });
+            }
+
+            const fhirPayload = SatuSehatMapper.toImagingStudy(dataLokal);
+
+            const satusehatResponse = await SatuSehatGateway.postResource('ImagingStudy', fhirPayload);
+
+            const updatedPemeriksaan = await prisma.pemeriksaanRadiologi.update({
+                where: { id: pemeriksaanId },
+                data: {
+                    satusehatId: satusehatResponse.id
+                }
+            });
+
+            res.status(200).json({
+                success: true,
+                message: 'Berhasil sinkronisasi ImagingStudy ke SATUSEHAT',
+                data: {
+                    idLokal: updatedPemeriksaan.id,
+                    satusehatId: updatedPemeriksaan.satusehatId,
+                }
+            });
+
+        } catch (error) {
+
+            if (error.details) {
+                return res.status(error.statusCode).json({
+                    success: false,
+                    message: error.message,
+                    satusehat_error: error.details
+                });
+            }
+            next(error);
+        }
+    }
+
+};
+
+module.exports = radiologiController;
+
 --- FILE: src\controllers\rawatJalan.controller.js ---
 const rawatJalanService = require('../services/rawatJalan.service');
 
@@ -2594,6 +3574,20 @@ const selesaikanPemeriksaan = async (req, res, next) => {
   }
 };
 
+const tundaPemeriksaan = async (req, res, next) => {
+  try {
+    const { kunjunganId } = req.params;
+    const data = await rawatJalanService.tundaPemeriksaan(kunjunganId);
+    res.status(200).json({
+      success: true,
+      message: 'Pemeriksaan ditunda dan dikembalikan ke antrean',
+      data,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 const getRekamMedis = async (req, res, next) => {
   try {
     const { kunjunganId } = req.params;
@@ -2647,6 +3641,27 @@ const simpanRujukan = async (req, res, next) => {
   }
 };
 
+const simpanAlergi = async (req, res, next) => {
+  try {
+    const { kunjunganId } = req.params;
+    const { alergiArr } = req.body;
+    const data = await rawatJalanService.simpanAlergi(kunjunganId, alergiArr, req.user);
+    res.status(200).json({ success: true, message: 'Data alergi berhasil disimpan', data });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const getAlergi = async (req, res, next) => {
+  try {
+    const { kunjunganId } = req.params;
+    const data = await rawatJalanService.getAlergiByKunjungan(kunjunganId);
+    res.status(200).json({ success: true, data });
+  } catch (error) {
+    next(error);
+  }
+};
+
 const pulang = async (req, res, next) => {
   try {
     const { kunjunganId } = req.params;
@@ -2664,6 +3679,7 @@ module.exports = {
   simpanDiagnosa,
   simpanTindakan,
   selesaikanPemeriksaan,
+  tundaPemeriksaan,
   getRekamMedis,
   getDiagnosa,
   getTindakan,
@@ -2672,6 +3688,241 @@ module.exports = {
   pulang,
   getRiwayatDokter,
   getRiwayatPasienByRM,
+  simpanAlergi,
+  getAlergi,
+};
+
+--- FILE: src\controllers\satusehat.controller.js ---
+const satusehatService = require('../services/satusehat.service');
+const satusehatConfig = require('../config/satusehat');
+
+const prisma = require('../config/prisma');
+
+const testAuth = async (req, res, next) => {
+  try {
+    const token = await satusehatService.generateAccessToken();
+
+    return res.status(200).json({
+      success: true,
+      message: 'Berhasil terhubung ke SATUSEHAT!',
+      data: {
+        environment: satusehatConfig.IS_SANDBOX ? 'Sandbox' : 'Production',
+        organizationId: satusehatConfig.SATUSEHAT_ORG_ID,
+        token_preview: token.substring(0, 20) + '...'
+      }
+    });
+  } catch (error) {
+    console.error('SATUSEHAT Auth Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal mendapatkan token SATUSEHAT',
+      error: error.message
+    });
+  }
+};
+
+const syncPatientIHS = async (req, res, next) => {
+  try {
+    const { nik } = req.params;
+
+    if (!nik || nik.length !== 16) {
+      return res.status(400).json({ success: false, message: 'NIK tidak valid' });
+    }
+
+    const result = await satusehatService.getPatientByNIK(nik);
+
+    if (!result.success) {
+      return res.status(404).json({
+        success: false,
+        message: result.message
+      });
+    }
+
+    const ihsNumber = result.ihsNumber;
+
+    const updatedPasien = await prisma.pasien.update({
+      where: { nik: nik },
+      data: { noIHS: ihsNumber }
+    }).catch(() => null);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Berhasil mendapatkan IHS Number dari SATUSEHAT',
+      data: {
+        nik: nik,
+        ihsNumber: ihsNumber,
+        pasienName: result.data.name?.[0]?.text || '',
+        birthDate: result.data.birthDate || '',
+        gender: result.data.gender || '',
+        updatedInDb: !!updatedPasien
+      }
+    });
+
+  } catch (error) {
+    console.error('SATUSEHAT Sync Patient Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal sinkronisasi data pasien dengan SATUSEHAT',
+      error: error.message
+    });
+  }
+};
+
+const syncPractitionerIHS = async (req, res, next) => {
+  try {
+    const { nik } = req.params;
+
+    const { userId } = req.query;
+
+    if (!nik || nik.length !== 16) {
+      return res.status(400).json({ success: false, message: 'NIK tidak valid' });
+    }
+
+    const result = await satusehatService.getPractitionerByNIK(nik);
+
+    if (!result.success) {
+      return res.status(404).json({
+        success: false,
+        message: result.message
+      });
+    }
+
+    const ihsNumber = result.ihsNumber;
+    let updatedMedis = null;
+
+    if (userId) {
+      updatedMedis = await prisma.tenagaMedis.upsert({
+        where: { userId: userId },
+        update: {
+          nik: nik,
+          noIHS: ihsNumber
+        },
+        create: {
+          userId: userId,
+          nik: nik,
+          noIHS: ihsNumber
+        }
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Berhasil mendapatkan IHS Number Tenaga Medis dari SATUSEHAT',
+      data: {
+        nik: nik,
+        ihsNumber: ihsNumber,
+        practitionerName: result.data.name?.[0]?.text || '',
+        updatedInDb: !!updatedMedis
+      }
+    });
+
+  } catch (error) {
+    console.error('SATUSEHAT Sync Practitioner Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal sinkronisasi data tenaga medis dengan SATUSEHAT',
+      error: error.message
+    });
+  }
+};
+
+const syncPoliklinikLocation = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const poliklinik = await prisma.poliklinik.findUnique({
+      where: { id }
+    });
+
+    if (!poliklinik) {
+      return res.status(404).json({ success: false, message: 'Poliklinik tidak ditemukan' });
+    }
+
+    if (poliklinik.ihsLocationId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Poliklinik ini sudah memiliki Location ID SATUSEHAT',
+        data: { ihsLocationId: poliklinik.ihsLocationId }
+      });
+    }
+
+    const result = await satusehatService.createLocation(poliklinik);
+
+    await prisma.poliklinik.update({
+      where: { id },
+      data: {
+        ihsLocationId: result.ihsLocationId
+      }
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Berhasil mendaftarkan lokasi Poliklinik ke SATUSEHAT',
+      data: {
+        ihsLocationId: result.ihsLocationId
+      }
+    });
+
+  } catch (error) {
+    console.error('SATUSEHAT Sync Location Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal sinkronisasi lokasi dengan SATUSEHAT',
+      error: error.message
+    });
+  }
+};
+
+const searchKFA = async (req, res, next) => {
+  try {
+    const { keyword } = req.query;
+    const result = await satusehatService.searchKFA(keyword);
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error('SATUSEHAT KFA Search Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal mencari produk KFA',
+      error: error.message
+    });
+  }
+};
+
+const dispenseMedication = async (req, res, next) => {
+  try {
+    const data = req.body;
+
+    if (!data.resepId || !data.resepDetailId || !data.kodeObat || !data.pasienIhs || !data.practitionerIhs || !data.encounterId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Data tidak lengkap untuk mengirim MedicationDispense'
+      });
+    }
+
+    const result = await satusehatService.postMedicationDispense(data);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Berhasil mengirim MedicationDispense ke SATUSEHAT',
+      data: result
+    });
+  } catch (error) {
+    console.error('SATUSEHAT MedicationDispense Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal mengirim MedicationDispense',
+      error: error.message
+    });
+  }
+};
+
+module.exports = {
+  testAuth,
+  syncPatientIHS,
+  syncPractitionerIHS,
+  syncPoliklinikLocation,
+  searchKFA,
+  dispenseMedication
 };
 
 --- FILE: src\controllers\screening.controller.js ---
@@ -2746,10 +3997,40 @@ const addLogPemantauan = async (req, res, next) => {
   }
 };
 
+const syncKeSatuSehat = async (req, res, next) => {
+  try {
+    const { registerId } = req.params;
+
+    const result = await ukmService.syncEpisodeOfCare(registerId);
+
+    res.status(200).json({
+      success: true,
+      message: result.pesan,
+      data: {
+        satusehatConditionId: result.satusehatConditionId,
+        satusehatEpisodeId: result.satusehatEpisodeId
+      }
+    });
+
+  } catch (error) {
+
+    if (error.details) {
+      return res.status(error.statusCode || 400).json({
+        success: false,
+        message: error.message,
+        satusehat_error: error.details
+      });
+    }
+
+    next(error);
+  }
+};
+
 module.exports = {
   getDashboardStats,
   getPasienByProgram,
-  addLogPemantauan
+  addLogPemantauan,
+  syncKeSatuSehat
 };
 
 --- FILE: src\middlewares\auth.middleware.js ---
@@ -2871,6 +4152,23 @@ router.get('/me', protect, authController.getMe);
 
 module.exports = router;
 
+--- FILE: src\routes\bpjs.routes.js ---
+'use strict';
+
+const express = require('express');
+const bpjsController = require('../controllers/bpjs.controller');
+const { protect } = require('../middlewares/auth.middleware');
+
+const router = express.Router();
+
+router.use(protect);
+
+router.get('/peserta/:noBpjs', bpjsController.cekPeserta);
+
+router.post('/kunjungan/:kunjunganId/sync', bpjsController.syncKunjungan);
+
+module.exports = router;
+
 --- FILE: src\routes\dokter.routes.js ---
 const express = require('express');
 const router = express.Router();
@@ -2936,6 +4234,26 @@ router.delete('/master/:id', icd9Controller.deleteICD9);
 
 module.exports = router;
 
+--- FILE: src\routes\imunisasi.routes.js ---
+const express = require('express');
+const router = express.Router();
+const imunisasiController = require('../controllers/imunisasi.controller');
+const { protect } = require('../middlewares/auth.middleware');
+
+router.use(protect);
+
+router.get('/vaksin', imunisasiController.getMasterVaksin);
+
+router.get('/vaksin/:vaksinId/batch', imunisasiController.getBatchVaksin);
+
+router.post('/riwayat', imunisasiController.catatRiwayat);
+
+router.get('/riwayat/pasien/:pasienId', imunisasiController.getRiwayatPasien);
+
+router.post('/riwayat/:id/sync', imunisasiController.syncKeSatuSehat);
+
+module.exports = router;
+
 --- FILE: src\routes\index.js ---
 const express = require('express');
 const healthRoute = require('./health.routes');
@@ -2953,7 +4271,11 @@ const farmasiRoute = require('./farmasi.routes');
 const laboratoriumRoute = require('./laboratorium.routes');
 const kasirRoute = require('./kasir.route');
 const ukmRoute = require('./ukm.route');
+const radiologiRoute = require('./radiologi.routes');
+const satusehatRoute = require('./satusehat.routes');
+const bpjsRoute = require('./bpjs.routes');
 const router = express.Router();
+const imunisasiRoute = require('./imunisasi.routes');
 
 const defaultRoutes = [
   {
@@ -3015,6 +4337,22 @@ const defaultRoutes = [
   {
     path: '/ukm',
     route: ukmRoute,
+  },
+  {
+    path: '/radiologi',
+    route: radiologiRoute,
+  },
+  {
+    path: '/imunisasi',
+    route: imunisasiRoute,
+  },
+  {
+    path: '/satusehat',
+    route: satusehatRoute,
+  },
+  {
+    path: '/bpjs',
+    route: bpjsRoute,
   }
 ];
 
@@ -3068,8 +4406,12 @@ const router = express.Router();
 router.use(protect);
 
 router.get('/screening', kunjunganController.getKunjunganScreening);
+router.get('/dashboard-stats', kunjunganController.getDashboardStats);
+router.get('/perawat/dashboard-stats', kunjunganController.getPerawatDashboardStats);
+router.get('/dokter/dashboard-stats', kunjunganController.getDokterDashboardStats);
 router.get('/:id', kunjunganController.getKunjunganById);
 router.post('/:id/panggil', kunjunganController.panggilKunjungan);
+router.put('/:id/status', kunjunganController.updateStatusKunjungan);
 
 module.exports = router;
 
@@ -3103,6 +4445,28 @@ router.delete('/obat/:id', masterController.deleteMasterObat);
 
 module.exports = router;
 
+--- FILE: src\routes\masterAlergi.routes.js ---
+const express = require('express');
+const router = express.Router();
+const alergiController = require('../controllers/masterAlergi.controller');
+
+router.get('/', alergiController.getAllAlergi);
+router.get('/kfa', alergiController.searchKfa);
+router.post('/', alergiController.createAlergi);
+router.put('/:id', alergiController.updateAlergi);
+router.delete('/:id', alergiController.deleteAlergi);
+
+module.exports = router;
+
+--- FILE: src\routes\monitoring.routes.js ---
+const express = require('express');
+const router = express.Router();
+const monitoringController = require('../controllers/monitoring.controller');
+
+router.get('/', monitoringController.getMonitoringData);
+
+module.exports = router;
+
 --- FILE: src\routes\pasien.routes.js ---
 const express = require('express');
 const pasienController = require('../controllers/pasien.controller');
@@ -3133,6 +4497,26 @@ router.put('/:id', uploadPks.single('fileDokumenPks'), perusahaanController.upda
 
 module.exports = router;
 
+--- FILE: src\routes\radiologi.routes.js ---
+const express = require('express');
+const router = express.Router();
+const radiologiController = require('../controllers/radiologi.controller');
+const { protect } = require('../middlewares/auth.middleware');
+
+router.use(protect);
+
+router.post('/order', radiologiController.createOrder);
+
+router.get('/antrian', radiologiController.getAntrian);
+
+router.post('/:orderId/proses', radiologiController.prosesPemeriksaan);
+
+router.put('/:pemeriksaanId/ekspertise', radiologiController.simpanEkspertise);
+
+router.post('/:pemeriksaanId/sync-satusehat', radiologiController.syncKeSatuSehat);
+
+module.exports = router;
+
 --- FILE: src\routes\rawatJalan.routes.js ---
 const express = require('express');
 const rawatJalanController = require('../controllers/rawatJalan.controller');
@@ -3156,19 +4540,44 @@ router.post('/:kunjunganId/diagnosa', rawatJalanController.simpanDiagnosa);
 
 router.post('/:kunjunganId/tindakan', rawatJalanController.simpanTindakan);
 
+router.post('/:kunjunganId/alergi', rawatJalanController.simpanAlergi);
+
 router.get('/:kunjunganId/rekam-medis', rawatJalanController.getRekamMedis);
 
 router.get('/:kunjunganId/diagnosa', rawatJalanController.getDiagnosa);
 
 router.get('/:kunjunganId/tindakan', rawatJalanController.getTindakan);
 
+router.get('/:kunjunganId/alergi', rawatJalanController.getAlergi);
+
 router.post('/:kunjunganId/selesai', rawatJalanController.selesaikanPemeriksaan);
+
+router.post('/:kunjunganId/tunda', rawatJalanController.tundaPemeriksaan);
 
 router.post('/:kunjunganId/resep', rawatJalanController.simpanResep);
 
 router.post('/:kunjunganId/rujukan', rawatJalanController.simpanRujukan);
 
 router.post('/:kunjunganId/pulang', rawatJalanController.pulang);
+
+module.exports = router;
+
+--- FILE: src\routes\satusehat.routes.js ---
+const express = require('express');
+const router = express.Router();
+const satusehatController = require('../controllers/satusehat.controller');
+
+router.get('/auth-test', satusehatController.testAuth);
+
+router.get('/pasien/nik/:nik', satusehatController.syncPatientIHS);
+
+router.get('/praktisioner/nik/:nik', satusehatController.syncPractitionerIHS);
+
+router.post('/lokasi/poli/:id', satusehatController.syncPoliklinikLocation);
+
+router.get('/kfa', satusehatController.searchKFA);
+
+router.post('/medication-dispense', satusehatController.dispenseMedication);
 
 module.exports = router;
 
@@ -3197,6 +4606,8 @@ router.use(protect);
 router.get('/dashboard', ukmController.getDashboardStats);
 router.get('/program/:programId/pasien', ukmController.getPasienByProgram);
 router.post('/register/:registerId/log', ukmController.addLogPemantauan);
+
+router.post('/register/:registerId/sync', ukmController.syncKeSatuSehat);
 
 module.exports = router;
 
@@ -3280,6 +4691,8 @@ const bcrypt = require('bcryptjs');
 
 const prisma = new PrismaClient();
 
+const satusehatService = require('./satusehat.service');
+
 const dokterService = {
 
   getAllDokter: async () => {
@@ -3289,6 +4702,7 @@ const dokterService = {
       },
       include: {
         poliklinik: true,
+        tenagaMedis: true,
       },
       orderBy: {
         createdAt: 'desc',
@@ -3298,6 +4712,13 @@ const dokterService = {
 
   createDokter: async (data) => {
 
+    if (!data.nik) {
+      throw new Error('NIK wajib diisi untuk mendaftarkan dokter.');
+    }
+    if (data.nik.length !== 16) {
+      throw new Error('NIK harus terdiri dari 16 digit angka.');
+    }
+
     const existingUser = await prisma.user.findUnique({
       where: { username: data.username },
     });
@@ -3306,17 +4727,36 @@ const dokterService = {
       throw new Error('Username sudah digunakan. Silakan pilih username lain.');
     }
 
+    let satusehatData = null;
+    try {
+      satusehatData = await satusehatService.getPractitionerByNIK(data.nik);
+      if (!satusehatData.success) {
+        throw new Error(satusehatData.message || 'NIK tidak valid atau tidak terdaftar di Kemenkes.');
+      }
+    } catch (error) {
+      throw new Error(`Validasi SATUSEHAT gagal: ${error.message}`);
+    }
+
     const plainPassword = data.password || 'dokter123';
     const hashedPassword = await bcrypt.hash(plainPassword, 10);
 
     return await prisma.user.create({
       data: {
-        namaLengkap: data.namaLengkap,
+        namaLengkap: satusehatData?.data?.name?.[0]?.text || data.namaLengkap,
         username: data.username,
         password: hashedPassword,
         role: 'DOKTER',
         poliklinikId: data.poliklinikId || null,
+        tenagaMedis: {
+          create: {
+            nik: data.nik,
+            noIHS: satusehatData.ihsNumber,
+          }
+        }
       },
+      include: {
+        tenagaMedis: true,
+      }
     });
   },
 
@@ -3331,9 +4771,38 @@ const dokterService = {
       updateData.password = await bcrypt.hash(data.password, 10);
     }
 
+    let tenagaMedisUpdate = undefined;
+    if (data.nik) {
+      if (data.nik.length !== 16) throw new Error('NIK harus 16 digit.');
+
+      try {
+        const satusehatData = await satusehatService.getPractitionerByNIK(data.nik);
+        if (satusehatData.success) {
+          updateData.namaLengkap = satusehatData?.data?.name?.[0]?.text || data.namaLengkap;
+          tenagaMedisUpdate = {
+            upsert: {
+              create: { nik: data.nik, noIHS: satusehatData.ihsNumber },
+              update: { nik: data.nik, noIHS: satusehatData.ihsNumber }
+            }
+          };
+        } else {
+           throw new Error(satusehatData.message);
+        }
+      } catch (error) {
+         throw new Error(`Validasi SATUSEHAT gagal: ${error.message}`);
+      }
+    }
+
+    if (tenagaMedisUpdate) {
+       updateData.tenagaMedis = tenagaMedisUpdate;
+    }
+
     return await prisma.user.update({
       where: { id },
       data: updateData,
+      include: {
+        tenagaMedis: true,
+      }
     });
   },
 
@@ -3402,6 +4871,108 @@ module.exports = {
   updateICD9,
   deleteICD9
 };
+
+--- FILE: src\services\imunisasi.service.js ---
+const prisma = require('../config/prisma');
+
+const imunisasiService = {
+
+    getAllMasterVaksin: async () => {
+        return await prisma.masterVaksin.findMany({
+            where: { statusAktif: true },
+            orderBy: { namaVaksin: 'asc' },
+        });
+    },
+
+    getBatchByVaksin: async (vaksinId) => {
+        return await prisma.batchVaksin.findMany({
+            where: {
+                vaksinId: vaksinId,
+                statusAktif: true,
+                stok: { gt: 0 },
+                tanggalExpired: { gt: new Date() }
+            },
+            orderBy: { tanggalExpired: 'asc' },
+        });
+    },
+
+    catatRiwayat: async (data, petugasId) => {
+        const {
+            pasienId, kunjunganId, batchVaksinId, isRiwayatLuar,
+            dosisKe, dosisJumlah, lokasiSuntik, ruteSuntik, catatan, tanggalSuntik
+        } = data;
+
+        if (!isRiwayatLuar && !kunjunganId) {
+            const error = new Error('Penyuntikan di Puskesmas WAJIB menyertakan ID Kunjungan.');
+            error.statusCode = 400;
+            throw error;
+        }
+
+        return await prisma.$transaction(async (tx) => {
+
+            const batch = await tx.batchVaksin.findUnique({
+                where: { id: batchVaksinId },
+            });
+
+            if (!batch) throw new Error('Data Batch Vaksin tidak ditemukan.');
+            if (!isRiwayatLuar && batch.stok < 1) throw new Error('Stok vaksin untuk batch ini sudah habis.');
+
+            const riwayat = await tx.riwayatImunisasi.create({
+                data: {
+                    pasienId,
+                    kunjunganId: isRiwayatLuar ? null : kunjunganId,
+                    batchVaksinId,
+                    isRiwayatLuar: isRiwayatLuar || false,
+                    tanggalSuntik: tanggalSuntik ? new Date(tanggalSuntik) : new Date(),
+                    dosisKe: parseInt(dosisKe),
+                    dosisJumlah: dosisJumlah ? parseFloat(dosisJumlah) : null,
+                    lokasiSuntik,
+                    ruteSuntik,
+                    petugasId: isRiwayatLuar ? null : petugasId,
+                    catatan,
+                },
+            });
+
+            if (!isRiwayatLuar) {
+                await tx.batchVaksin.update({
+                    where: { id: batchVaksinId },
+                    data: { stok: batch.stok - 1 },
+                });
+            }
+
+            return riwayat;
+        });
+    },
+
+    getRiwayatByPasien: async (pasienId) => {
+        return await prisma.riwayatImunisasi.findMany({
+            where: { pasienId },
+            include: {
+                batchVaksin: {
+                    include: { vaksin: true }
+                },
+                petugas: { select: { namaLengkap: true } }
+            },
+            orderBy: { tanggalSuntik: 'desc' },
+        });
+    },
+
+    getRiwayatLengkapById: async (id) => {
+        return await prisma.riwayatImunisasi.findUnique({
+            where: { id },
+            include: {
+                pasien: { include: { persetujuan: true } },
+                kunjungan: true,
+                batchVaksin: {
+                    include: { vaksin: true }
+                },
+                petugas: true,
+            }
+        });
+    }
+};
+
+module.exports = imunisasiService;
 
 --- FILE: src\services\kasir.service.js ---
 const { PrismaClient } = require('@prisma/client');
@@ -3791,10 +5362,297 @@ const getKunjunganById = async (id) => {
   return kunjungan;
 };
 
+const updateStatusKunjungan = async (kunjunganId, statusBaru) => {
+  const kunjungan = await prisma.kunjungan.findUnique({
+    where: { id: kunjunganId }
+  });
+
+  if (!kunjungan) {
+    const err = new Error('Data Kunjungan tidak ditemukan');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  return await prisma.kunjungan.update({
+    where: { id: kunjunganId },
+    data: { statusKunjungan: statusBaru }
+  });
+};
+
+const getDashboardStats = async () => {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const tomorrow = new Date(today);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+
+  const totalHariIni = await prisma.kunjungan.count({
+    where: {
+      tanggalRegistrasi: { gte: today, lt: tomorrow }
+    }
+  });
+
+  const firstDayOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+  const totalBulanIni = await prisma.kunjungan.count({
+    where: {
+      tanggalRegistrasi: { gte: firstDayOfMonth, lt: tomorrow }
+    }
+  });
+
+  const menunggu = await prisma.kunjungan.count({
+    where: {
+      tanggalRegistrasi: { gte: today, lt: tomorrow },
+      statusKunjungan: { in: ['MENUNGGU', 'MENUNGGU_DOKTER'] }
+    }
+  });
+
+  const sedangDilayani = await prisma.kunjungan.count({
+    where: {
+      tanggalRegistrasi: { gte: today, lt: tomorrow },
+      statusKunjungan: { in: ['DIPROSES_SCREENING', 'DIPERIKSA'] }
+    }
+  });
+
+  const selesai = await prisma.kunjungan.count({
+    where: {
+      tanggalRegistrasi: { gte: today, lt: tomorrow },
+      statusKunjungan: { in: ['SELESAI', 'MENUNGGU_KASIR', 'MENUNGGU_FARMASI', 'PULANG', 'BATAL'] }
+    }
+  });
+
+  const allKunjunganToday = await prisma.kunjungan.findMany({
+    where: { tanggalRegistrasi: { gte: today, lt: tomorrow } },
+    include: {
+      pasien: {
+        include: { penjamin: true }
+      }
+    }
+  });
+
+  const pembayaranMap = {
+    'Umum / Mandiri': 0,
+    'BPJS Kesehatan': 0,
+    'Asuransi Swasta': 0,
+    'Perusahaan': 0,
+    'KIS': 0
+  };
+
+  allKunjunganToday.forEach(k => {
+    let jp = k.pasien?.penjamin?.jenisPenjamin || 'Umum / Mandiri';
+    if (jp === 'Umum') jp = 'Umum / Mandiri';
+    else if (jp.toLowerCase() === 'bpjs') jp = 'BPJS Kesehatan';
+
+    if (pembayaranMap[jp] === undefined) pembayaranMap[jp] = 0;
+    pembayaranMap[jp]++;
+  });
+
+  const pembayaranList = Object.keys(pembayaranMap).map(label => ({
+    label,
+    value: pembayaranMap[label]
+  })).sort((a, b) => b.value - a.value);
+
+  const prioritas = {
+    lansia: allKunjunganToday.filter(k => k.prioritas?.toLowerCase() === 'lansia').length,
+    disabilitas: allKunjunganToday.filter(k => k.prioritas?.toLowerCase() === 'disabilitas').length,
+    hamilMenyusui: allKunjunganToday.filter(k => k.prioritas?.toLowerCase().includes('hamil')).length,
+  };
+
+  const antreanHariIni = await prisma.kunjungan.findMany({
+    where: { tanggalRegistrasi: { gte: today, lt: tomorrow } },
+    include: {
+      pasien: {
+        include: { penjamin: true }
+      },
+      poliklinik: true
+    },
+    orderBy: [
+      { tanggalRegistrasi: 'desc' },
+      { jamRegistrasi: 'desc' }
+    ],
+    take: 50
+  });
+
+  const polis = await prisma.poliklinik.findMany();
+  const statusPoli = polis.map(p => {
+    const count = allKunjunganToday.filter(k => k.poliklinikId === p.id).length;
+    return {
+      nama: p.namaPoli,
+      jumlah: count,
+      status: p.statusAktif ? 'Buka' : 'Tutup'
+    };
+  });
+
+  const sevenDaysAgo = new Date();
+  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
+  sevenDaysAgo.setHours(0, 0, 0, 0);
+
+  const last7DaysData = await prisma.kunjungan.findMany({
+    where: {
+      tanggalRegistrasi: {
+        gte: sevenDaysAgo,
+        lt: tomorrow
+      }
+    },
+    include: {
+      pasien: {
+        include: { penjamin: true }
+      }
+    }
+  });
+
+  const grafik = [];
+  const days = ['Ming', 'Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab'];
+
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(sevenDaysAgo);
+    d.setDate(d.getDate() + i);
+    const dayStr = days[d.getDay()];
+
+    const isToday = d.getDate() === today.getDate() && d.getMonth() === today.getMonth();
+    const label = isToday ? 'Ini' : dayStr;
+
+    const kForDay = last7DaysData.filter(k => {
+      const kDate = new Date(k.tanggalRegistrasi);
+      return kDate.getDate() === d.getDate() && kDate.getMonth() === d.getMonth() && kDate.getFullYear() === d.getFullYear();
+    });
+
+    const bpjsCount = kForDay.filter(k => k.pasien?.penjamin?.jenisPenjamin?.toLowerCase() === 'bpjs').length;
+
+    grafik.push({
+      hari: label,
+      jumlah: kForDay.length,
+      bpjs: bpjsCount
+    });
+  }
+
+  return {
+    stats: {
+      totalHariIni,
+      totalBulanIni,
+      menunggu,
+      sedangDilayani,
+      selesai,
+      pembayaranList,
+      prioritas
+    },
+    antrean: antreanHariIni,
+    grafik,
+    poli: statusPoli
+  };
+};
+
+const getPerawatDashboardStats = async (user) => {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const tomorrow = new Date(today);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+
+  const poliFilter = user && user.poliklinikId ? { poliklinikId: user.poliklinikId } : {};
+
+  const allKunjunganPoli = await prisma.kunjungan.findMany({
+    where: {
+      tanggalRegistrasi: { gte: today, lt: tomorrow },
+      ...poliFilter
+    },
+    include: {
+      pasien: true,
+      poliklinik: true,
+      screening: true,
+    },
+    orderBy: [
+      { tanggalRegistrasi: 'asc' },
+      { jamRegistrasi: 'asc' }
+    ]
+  });
+
+  const totalAntrean = allKunjunganPoli.length;
+
+  const antreanAktif = allKunjunganPoli.filter(k => k.statusKunjungan === 'MENUNGGU' || k.statusKunjungan === 'DIPROSES_SCREENING');
+
+  const belumSkrining = allKunjunganPoli.filter(k => k.statusKunjungan === 'MENUNGGU').length;
+  const sudahSkrining = allKunjunganPoli.filter(k =>
+    k.statusKunjungan === 'DIPERIKSA' ||
+    k.statusKunjungan === 'SELESAI' ||
+    k.statusKunjungan === 'MENUNGGU_KASIR' ||
+    k.statusKunjungan === 'MENUNGGU_FARMASI' ||
+    k.statusKunjungan === 'PULANG'
+  ).length;
+
+  const triage = {
+    merah: 0,
+    kuning: 0,
+    hijau: 0,
+    hitam: 0
+  };
+
+  allKunjunganPoli.forEach(k => {
+    if (k.screening && k.screening.kategoriTriage) {
+      const kat = k.screening.kategoriTriage.toLowerCase();
+      if (kat.includes('merah')) triage.merah++;
+      else if (kat.includes('kuning')) triage.kuning++;
+      else if (kat.includes('hijau')) triage.hijau++;
+      else if (kat.includes('hitam')) triage.hitam++;
+    }
+  });
+
+  return {
+    stats: {
+      totalAntrean,
+      belumSkrining,
+      sudahSkrining
+    },
+    triage,
+    antrean: antreanAktif
+  };
+};
+
+const getDokterDashboardStats = async (user) => {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const tomorrow = new Date(today);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+
+  const poliFilter = {};
+  if (user && (user.role === 'DOKTER' || user.role === 'PERAWAT') && user.poliklinikId) {
+    poliFilter.OR = [
+      { poliklinikId: user.poliklinikId },
+      { dokterTujuanId: user.id }
+    ];
+  }
+
+  const allKunjunganPoliHariIni = await prisma.kunjungan.findMany({
+    where: {
+      tanggalRegistrasi: { gte: today, lt: tomorrow },
+      ...(poliFilter.OR ? { OR: poliFilter.OR } : poliFilter)
+    }
+  });
+
+  const totalHariIni = allKunjunganPoliHariIni.length;
+
+  const menunggu = allKunjunganPoliHariIni.filter(k => k.statusKunjungan === 'MENUNGGU_DOKTER').length;
+  const sedangDilayani = allKunjunganPoliHariIni.filter(k => k.statusKunjungan === 'DIPERIKSA' || k.statusKunjungan === 'MENUNGGU_LAB').length;
+  const selesai = allKunjunganPoliHariIni.filter(k =>
+    k.statusKunjungan === 'SELESAI' ||
+    k.statusKunjungan === 'MENUNGGU_KASIR' ||
+    k.statusKunjungan === 'MENUNGGU_FARMASI' ||
+    k.statusKunjungan === 'PULANG'
+  ).length;
+
+  return {
+    totalHariIni,
+    menunggu,
+    sedangDilayani,
+    selesai
+  };
+};
+
 module.exports = {
   getKunjunganScreening,
   panggilKunjungan,
   getKunjunganById,
+  updateStatusKunjungan,
+  getDashboardStats,
+  getPerawatDashboardStats,
+  getDokterDashboardStats,
 };
 
 --- FILE: src\services\laboratorium.service.js ---
@@ -3977,9 +5835,71 @@ module.exports = {
   deleteMasterObat,
 };
 
+--- FILE: src\services\masterAlergi.service.js ---
+const { PrismaClient } = require('@prisma/client');
+const prisma = new PrismaClient();
+
+const getAllAlergi = async () => {
+  return await prisma.masterAlergi.findMany({
+    orderBy: { nama_alergi: 'asc' }
+  });
+};
+
+const createAlergi = async (data) => {
+  const { kode_snomed, nama_alergi, kategori, status_aktif } = data;
+
+  const existing = await prisma.masterAlergi.findUnique({
+    where: { kode_snomed }
+  });
+  if (existing) {
+    const error = new Error('Kode SNOMED sudah digunakan');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return await prisma.masterAlergi.create({
+    data: {
+      kode_snomed,
+      nama_alergi,
+      kategori,
+      status_aktif: status_aktif !== undefined ? status_aktif : true
+    }
+  });
+};
+
+const updateAlergi = async (id, data) => {
+  const { kode_snomed, nama_alergi, kategori, status_aktif } = data;
+
+  return await prisma.masterAlergi.update({
+    where: { id_alergi: id },
+    data: {
+      kode_snomed,
+      nama_alergi,
+      kategori,
+      status_aktif
+    }
+  });
+};
+
+const deleteAlergi = async (id) => {
+  return await prisma.masterAlergi.delete({
+    where: { id_alergi: id }
+  });
+};
+
+module.exports = {
+  getAllAlergi,
+  createAlergi,
+  updateAlergi,
+  deleteAlergi
+};
+
 --- FILE: src\services\pasien.service.js ---
 const prisma = require('../config/prisma');
 const cloudinary = require('cloudinary').v2;
+const satusehatService = require('./satusehat.service');
+const PCareService = require('./bpjs/pcare.service');
+const bpjsConfig = require('../config/bpjs');
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -4171,6 +6091,89 @@ const createPasien = async (data) => {
       }
     });
 
+    if (data.persetujuanSatusehat && pasien.noIHS && data.dokterTujuan !== 'Bebas') {
+      try {
+        const dokter = await tx.user.findUnique({
+          where: { id: data.dokterTujuan },
+          include: { tenagaMedis: true }
+        });
+
+        if (dokter && dokter.tenagaMedis && dokter.tenagaMedis.noIHS && poliklinik && poliklinik.ihsLocationId) {
+          const encounterResult = await satusehatService.createEncounter({
+            pasienIhs: pasien.noIHS,
+            pasienName: pasien.namaLengkap,
+            dokterIhs: dokter.tenagaMedis.noIHS,
+            dokterName: dokter.namaLengkap,
+            poliIhs: poliklinik.ihsLocationId,
+            poliName: poliklinik.namaPoli,
+            noKunjungan: kunjungan.id,
+            jenisPelayanan: data.jenisPelayanan,
+            peranDokter: 'ATND'
+          });
+
+          if (encounterResult.success) {
+
+            const syncData = {
+              Encounter: { status: 'SUCCESS', id: encounterResult.encounterId }
+            };
+            await tx.kunjungan.update({
+              where: { id: kunjungan.id },
+              data: {
+                encounterId: encounterResult.encounterId,
+                satusehatSync: syncData
+              }
+            });
+            kunjungan.encounterId = encounterResult.encounterId;
+          }
+        }
+      } catch (error) {
+        console.error('Failed to create Encounter in SATUSEHAT:', error);
+
+      }
+    }
+
+    const isBpjs = data.jenisPenjamin === 'BPJS' || data.jenisPenjamin === 'BPJS Kesehatan';
+    const hasBpjsCredentials = bpjsConfig.BPJS_CONS_ID && bpjsConfig.BPJS_SECRET_KEY;
+
+    if (isBpjs && data.noBpjs && hasBpjsCredentials) {
+      try {
+
+        const tglDaftar = new Date(data.tanggalRegistrasi).toISOString().split('T')[0];
+
+        const pcareResult = await PCareService.daftarkanKunjungan({
+          noBpjs: data.noBpjs,
+          tanggalRegistrasi: tglDaftar,
+          kdPoliTujuan: poliklinik?.kodePoli || data.poliTujuan,
+          noRM: pasien.noRM,
+        });
+
+        await tx.kunjungan.update({
+          where: { id: kunjungan.id },
+          data: {
+            noKunjunganPcare: pcareResult.noKunjungan,
+            noUrutPcare: pcareResult.noUrut?.toString(),
+            statusKlaimBpjs: 'TERKIRIM',
+          },
+        });
+
+        kunjungan.noKunjunganPcare = pcareResult.noKunjungan;
+        kunjungan.statusKlaimBpjs = 'TERKIRIM';
+
+        console.log(`[BPJS PCare] Kunjungan berhasil didaftarkan. NoKunjungan: ${pcareResult.noKunjungan}`);
+      } catch (bpjsError) {
+
+        console.error('[BPJS PCare] Gagal mendaftarkan kunjungan (soft-fail):', bpjsError.message);
+
+        await tx.kunjungan.update({
+          where: { id: kunjungan.id },
+          data: { statusKlaimBpjs: 'PENDING_SYNC' },
+        });
+
+        kunjungan.statusKlaimBpjs = 'PENDING_SYNC';
+
+      }
+    }
+
     return { ...pasien, kunjungan };
   });
 
@@ -4289,12 +6292,155 @@ module.exports = {
   updatePerusahaan
 };
 
+--- FILE: src\services\radiologi.service.js ---
+const prisma = require('../config/prisma');
+
+const radiologiService = {
+
+    createOrder: async (data) => {
+        const { kunjunganId, pasienId, dokterId, catatanKlinis } = data;
+
+        const kunjungan = await prisma.kunjungan.findUnique({
+            where: { id: kunjunganId },
+        });
+
+        if (!kunjungan) {
+            const error = new Error('Data kunjungan tidak ditemukan.');
+            error.statusCode = 404;
+            throw error;
+        }
+
+        return await prisma.$transaction(async (tx) => {
+            const newOrder = await tx.orderRadiologi.create({
+                data: {
+                    kunjunganId,
+                    pasienId,
+                    dokterId,
+                    catatanKlinis,
+                    status: 'MENUNGGU_RADIOLOGI',
+                },
+            });
+
+            await tx.kunjungan.update({
+                where: { id: kunjunganId },
+                data: { statusKunjungan: 'MENUNGGU_RADIOLOGI' },
+            });
+
+            return newOrder;
+        });
+    },
+
+    getAntrianRadiologi: async () => {
+        return await prisma.orderRadiologi.findMany({
+            where: {
+                status: { in: ['MENUNGGU_RADIOLOGI', 'DIPROSES'] },
+            },
+            include: {
+                pasien: true,
+                dokter: { select: { id: true, namaLengkap: true } },
+                kunjungan: { select: { id: true, noAntrian: true, satusehatId: true } },
+                pemeriksaan: true,
+            },
+            orderBy: { tanggalOrder: 'asc' },
+        });
+    },
+
+    prosesPemeriksaan: async (orderId, dataPemeriksaan) => {
+        const { modalityId, studyInstanceUid, bodySite } = dataPemeriksaan;
+
+        const order = await prisma.orderRadiologi.findUnique({
+            where: { id: orderId },
+            include: { kunjungan: true },
+        });
+
+        if (!order) throw new Error('Order Radiologi tidak ditemukan.');
+
+        return await prisma.$transaction(async (tx) => {
+
+            const pemeriksaan = await tx.pemeriksaanRadiologi.create({
+                data: {
+                    orderId,
+                    kunjunganId: order.kunjunganId,
+                    modalityId,
+                    studyInstanceUid,
+                    bodySite,
+                    waktuPemeriksaan: new Date(),
+                },
+            });
+
+            await tx.orderRadiologi.update({
+                where: { id: orderId },
+                data: { status: 'DIPROSES' },
+            });
+
+            return pemeriksaan;
+        });
+    },
+
+    simpanEkspertise: async (pemeriksaanId, dokterPembacaId, hasilData) => {
+        const { interpretasi, kesan, fileDicomUrl } = hasilData;
+
+        return await prisma.$transaction(async (tx) => {
+            const pemeriksaan = await tx.pemeriksaanRadiologi.update({
+                where: { id: pemeriksaanId },
+                data: {
+                    interpretasi,
+                    kesan,
+                    dokterPembacaId,
+                    fileDicomUrl,
+                },
+                include: {
+                    order: true,
+                    kunjungan: true,
+                }
+            });
+
+            await tx.orderRadiologi.update({
+                where: { id: pemeriksaan.orderId },
+                data: { status: 'SELESAI' },
+            });
+
+            await tx.kunjungan.update({
+                where: { id: pemeriksaan.kunjunganId },
+                data: { statusKunjungan: 'DIPERIKSA' },
+            });
+
+            return pemeriksaan;
+        });
+    },
+
+    getPemeriksaanLengkapById: async (pemeriksaanId) => {
+        return await prisma.pemeriksaanRadiologi.findUnique({
+            where: { id: pemeriksaanId },
+            include: {
+                kunjungan: {
+                    include: {
+                        pasien: true,
+                        persetujuan: true
+                    }
+                },
+                modality: true,
+                dokterPembaca: true
+            },
+        });
+    }
+};
+
+module.exports = radiologiService;
+
 --- FILE: src\services\rawatJalan.service.js ---
 const prisma = require('../config/prisma');
 const ukmService = require('./ukm.service');
+const satusehatService = require('./satusehat.service');
 
 const getAntrianDokter = async (user) => {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const tomorrow = new Date(today);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+
   const whereClause = {
+    tanggalRegistrasi: { gte: today, lt: tomorrow },
     statusKunjungan: {
       in: ['MENUNGGU_DOKTER', 'DIPERIKSA', 'MENUNGGU_LAB'],
     },
@@ -4307,7 +6453,7 @@ const getAntrianDokter = async (user) => {
     ];
   }
 
-  const kunjungans = await prisma.kunjungan.findMany({
+  let kunjungans = await prisma.kunjungan.findMany({
     where: whereClause,
     include: {
       pasien: true,
@@ -4322,11 +6468,41 @@ const getAntrianDokter = async (user) => {
           details: true
         }
       }
-    },
-    orderBy: [
-      { tanggalRegistrasi: 'asc' },
-      { jamRegistrasi: 'asc' },
-    ],
+    }
+  });
+
+  kunjungans = kunjungans.map(kunjungan => {
+    let score = 1;
+
+    const triage = kunjungan.screening?.kategoriTriage?.toLowerCase() || '';
+    if (triage === 'merah') {
+      score = 4;
+    } else if (triage === 'kuning') {
+      score = 3;
+    } else if (triage === 'hitam') {
+      score = 0;
+    } else {
+
+      const prioritas = kunjungan.prioritas?.toLowerCase() || '';
+      if (['lansia', 'disabilitas', 'ibu hamil', 'bayi', 'anak'].some(p => prioritas.includes(p))) {
+        score = 2;
+      }
+    }
+
+    return { ...kunjungan, _priorityScore: score };
+  });
+
+  kunjungans.sort((a, b) => {
+    if (b._priorityScore !== a._priorityScore) {
+      return b._priorityScore - a._priorityScore;
+    }
+
+    const dateStrA = a.tanggalRegistrasi.toISOString().split('T')[0];
+    const dateStrB = b.tanggalRegistrasi.toISOString().split('T')[0];
+    const dateTimeA = new Date(`${dateStrA}T${a.jamRegistrasi || '00:00'}:00`);
+    const dateTimeB = new Date(`${dateStrB}T${b.jamRegistrasi || '00:00'}:00`);
+
+    return dateTimeA - dateTimeB;
   });
 
   return kunjungans;
@@ -4493,6 +6669,10 @@ const simpanSOAP = async (rekamMedisId, data) => {
 const simpanDiagnosa = async (kunjunganId, user, diagnosaArr) => {
   const kunjungan = await prisma.kunjungan.findUnique({
     where: { id: kunjunganId },
+    include: {
+      pasien: true,
+      dokterTujuan: { include: { tenagaMedis: true } }
+    }
   });
 
   if (!kunjungan) {
@@ -4517,17 +6697,55 @@ const simpanDiagnosa = async (kunjunganId, user, diagnosaArr) => {
       penginputId,
       jenisDiagnosis: d.jenisDiagnosis || 'Utama',
       diagnosisKlinis: d.diagnosisKlinis || null,
-      statusDiagnosis: 'Kerja',
+      statusKlinis: d.statusKlinis || 'Aktif',
+      statusDiagnosis: d.statusVerifikasi || 'Suspek',
     })),
   });
+
+  let conditionCount = 0;
 
   for (const d of diagnosaArr) {
     if (d.icd10Id) {
       const icd10 = await prisma.masterICD10.findUnique({ where: { id_icd10: d.icd10Id } });
+
       if (icd10 && icd10.kode_icd10) {
+
         await ukmService.autoRegisterUKM(kunjungan.pasienId, icd10.kode_icd10);
+
+        const dokterTujuan = kunjungan.dokterTujuan;
+        if (kunjungan.encounterId && kunjungan.pasien?.noIHS && dokterTujuan?.tenagaMedis?.noIHS) {
+          try {
+            await satusehatService.createCondition({
+              pasienIhs: kunjungan.pasien.noIHS,
+              pasienName: kunjungan.pasien.namaLengkap,
+              dokterIhs: dokterTujuan.tenagaMedis.noIHS,
+              dokterName: dokterTujuan.namaLengkap,
+              encounterId: kunjungan.encounterId,
+              kodeIcd10: icd10.kode_icd10,
+              namaDiagnosis: icd10.nama_diagnosis,
+              statusDiagnosis: d.statusVerifikasi || 'Suspek',
+              statusKlinis: d.statusKlinis || 'Aktif'
+            });
+            conditionCount++;
+          } catch (err) {
+            console.error(`Error sync Condition SATUSEHAT untuk ICD ${icd10.kode_icd10}:`, err.message);
+          }
+        }
       }
     }
+  }
+
+  if (conditionCount > 0) {
+    const syncStatus = (typeof kunjungan.satusehatSync === 'object' && kunjungan.satusehatSync !== null)
+      ? { ...kunjungan.satusehatSync }
+      : {};
+
+    syncStatus.Condition = { status: 'SUCCESS', detail: `Sent ${conditionCount} diagnosis conditions` };
+
+    await prisma.kunjungan.update({
+      where: { id: kunjunganId },
+      data: { satusehatSync: syncStatus }
+    });
   }
 
   return created;
@@ -4536,6 +6754,10 @@ const simpanDiagnosa = async (kunjunganId, user, diagnosaArr) => {
 const simpanTindakan = async (kunjunganId, user, tindakanArr) => {
   const kunjungan = await prisma.kunjungan.findUnique({
     where: { id: kunjunganId },
+    include: {
+      pasien: true,
+      dokterTujuan: { include: { tenagaMedis: true } }
+    }
   });
 
   if (!kunjungan) {
@@ -4559,7 +6781,121 @@ const simpanTindakan = async (kunjunganId, user, tindakanArr) => {
     })),
   });
 
+  let procedureCount = 0;
+  for (const t of tindakanArr) {
+    if (t.icd9Id) {
+      const icd9 = await prisma.masterICD9.findUnique({ where: { id_icd9: t.icd9Id } });
+
+      if (icd9 && icd9.kode_icd9) {
+
+        const dokterTujuan = kunjungan.dokterTujuan;
+
+        if (kunjungan.encounterId && kunjungan.pasien?.noIHS && dokterTujuan?.tenagaMedis?.noIHS) {
+          try {
+            await satusehatService.createProcedure({
+              pasienIhs: kunjungan.pasien.noIHS,
+              pasienName: kunjungan.pasien.namaLengkap,
+              dokterIhs: dokterTujuan.tenagaMedis.noIHS,
+              dokterName: dokterTujuan.namaLengkap,
+              encounterId: kunjungan.encounterId,
+              kodeIcd9: icd9.kode_icd9,
+              namaProsedur: icd9.nama_prosedur,
+              tindakanId: `${kunjunganId}-${icd9.id_icd9}`,
+              waktuTindakan: new Date().toISOString()
+            });
+            procedureCount++;
+          } catch (err) {
+            console.error(`Error sync Procedure SATUSEHAT untuk ICD-9 ${icd9.kode_icd9}:`, err.message);
+          }
+        }
+      }
+    }
+  }
+
+  if (procedureCount > 0) {
+    const syncStatus = (typeof kunjungan.satusehatSync === 'object' && kunjungan.satusehatSync !== null)
+      ? { ...kunjungan.satusehatSync }
+      : {};
+
+    syncStatus.Procedure = { status: 'SUCCESS', detail: `Sent ${procedureCount} procedures` };
+
+    await prisma.kunjungan.update({
+      where: { id: kunjunganId },
+      data: { satusehatSync: syncStatus }
+    });
+  }
+
   return created;
+};
+
+const simpanAlergi = async (kunjunganId, alergiArr, user) => {
+  const kunjungan = await prisma.kunjungan.findUnique({
+    where: { id: kunjunganId },
+    include: {
+      pasien: true,
+      dokterTujuan: { include: { tenagaMedis: true } }
+    }
+  });
+
+  if (!kunjungan) {
+    const err = new Error('Data kunjungan tidak ditemukan');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  await prisma.alergiPasien.deleteMany({
+    where: { kunjunganId }
+  });
+
+  if (!alergiArr || alergiArr.length === 0) return [];
+
+  await prisma.alergiPasien.createMany({
+    data: alergiArr.map((a) => ({
+      pasienId: kunjungan.pasienId,
+      kunjunganId,
+      alergiId: a.alergiId,
+      manifestasiKode: a.manifestasiKode,
+      manifestasiNama: a.manifestasiNama,
+      tingkatKeparahan: a.tingkatKeparahan || 'low'
+    }))
+  });
+
+  const insertedAlergis = await prisma.alergiPasien.findMany({
+    where: { kunjunganId },
+    include: { alergiMaster: true }
+  });
+
+  if (user && user.role === 'DOKTER') {
+    const { createAllergyIntolerance } = require('./satusehat.service');
+    let syncLogs = kunjungan.satusehatSync || {};
+    if (typeof syncLogs !== 'object') syncLogs = {};
+    if (!syncLogs.allergy) syncLogs.allergy = [];
+
+    for (const alergi of insertedAlergis) {
+    if (kunjungan.encounterId && kunjungan.dokterTujuan?.tenagaMedis?.noIHS && kunjungan.pasien?.noIHS) {
+      try {
+        const res = await createAllergyIntolerance(kunjungan.pasien, kunjungan.dokterTujuan, kunjungan, alergi);
+        if (res.success) {
+          syncLogs.allergy.push({
+            idLokal: alergi.id,
+            allergyId: res.allergyId,
+            status: 'SUCCESS',
+            timestamp: new Date().toISOString()
+          });
+        }
+      } catch (error) {
+        console.error("Gagal sinkronisasi alergi ke SATUSEHAT:", error.message);
+      }
+    }
+  }
+
+    await prisma.kunjungan.update({
+      where: { id: kunjunganId },
+      data: { satusehatSync: syncLogs }
+    });
+  }
+
+  return insertedAlergis;
 };
 
 const selesaikanPemeriksaan = async (kunjunganId, user) => {
@@ -4576,7 +6912,13 @@ const selesaikanPemeriksaan = async (kunjunganId, user) => {
       data: updateData,
     });
 
-    return rm;
+  });
+};
+
+const tundaPemeriksaan = async (kunjunganId) => {
+  return await prisma.kunjungan.update({
+    where: { id: kunjunganId },
+    data: { statusKunjungan: 'MENUNGGU_DOKTER' },
   });
 };
 
@@ -4589,6 +6931,14 @@ const getRekamMedisByKunjungan = async (kunjunganId) => {
     },
   });
   return rm;
+};
+
+const getAlergiByKunjungan = async (kunjunganId) => {
+  return await prisma.alergiPasien.findMany({
+    where: { kunjunganId },
+    include: { alergiMaster: true },
+    orderBy: { createdAt: 'asc' }
+  });
 };
 
 const getDiagnosaByKunjungan = async (kunjunganId) => {
@@ -4616,6 +6966,10 @@ const getTindakanByKunjungan = async (kunjunganId) => {
 const simpanResep = async (kunjunganId, user, resepArr) => {
   const kunjungan = await prisma.kunjungan.findUnique({
     where: { id: kunjunganId },
+    include: {
+      pasien: true,
+      dokterTujuan: { include: { tenagaMedis: true } }
+    }
   });
 
   if (!kunjungan) {
@@ -4627,7 +6981,7 @@ const simpanResep = async (kunjunganId, user, resepArr) => {
   const dokterId = kunjungan.dokterTujuanId || user.id;
   const penginputId = user.role === 'PERAWAT' ? user.id : null;
 
-  return await prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
 
     const resep = await tx.resep.create({
       data: {
@@ -4654,8 +7008,50 @@ const simpanResep = async (kunjunganId, user, resepArr) => {
       data: { statusKunjungan: 'MENUNGGU_KASIR' },
     });
 
-    return resep;
+    return { resep, details };
   });
+
+  let medCount = 0;
+  for (const det of result.details) {
+    const obat = await prisma.masterObat.findUnique({ where: { id: det.obatId } });
+    if (obat && obat.kodeObat && kunjungan.encounterId && kunjungan.pasien?.noIHS && kunjungan.dokterTujuan?.tenagaMedis?.noIHS) {
+      try {
+        await satusehatService.createPrescription({
+          pasienIhs: kunjungan.pasien.noIHS,
+          pasienName: kunjungan.pasien.namaLengkap,
+          dokterIhs: kunjungan.dokterTujuan.tenagaMedis.noIHS,
+          dokterName: kunjungan.dokterTujuan.namaLengkap,
+          encounterId: kunjungan.encounterId,
+          kodeObat: obat.kodeObat,
+          namaObat: obat.namaObat,
+          sediaan: obat.sediaan,
+          resepId: result.resep.id,
+          resepDetailId: `${result.resep.id}-${obat.id}`,
+          jumlah: det.jumlah,
+          aturanPakai: det.aturanPakai
+        });
+        medCount++;
+      } catch (err) {
+        console.error(`Error sync Prescription SATUSEHAT untuk Obat ${obat.kodeObat}:`, err.message);
+      }
+    }
+  }
+
+  if (medCount > 0) {
+    const syncStatus = (typeof kunjungan.satusehatSync === 'object' && kunjungan.satusehatSync !== null)
+      ? { ...kunjungan.satusehatSync }
+      : {};
+
+    syncStatus.Medication = { status: 'SUCCESS', detail: `Sent ${medCount} medications` };
+    syncStatus.MedicationRequest = { status: 'SUCCESS', detail: `Sent ${medCount} prescriptions` };
+
+    await prisma.kunjungan.update({
+      where: { id: kunjunganId },
+      data: { satusehatSync: syncStatus }
+    });
+  }
+
+  return result.resep;
 };
 
 const simpanRujukan = async (kunjunganId, dokterId, rujukanData) => {
@@ -4697,9 +7093,12 @@ module.exports = {
   simpanDiagnosa,
   simpanTindakan,
   selesaikanPemeriksaan,
+  tundaPemeriksaan,
   getRekamMedisByKunjungan,
   getDiagnosaByKunjungan,
   getTindakanByKunjungan,
+  simpanAlergi,
+  getAlergiByKunjungan,
   simpanResep,
   simpanRujukan,
   pulang,
@@ -4707,11 +7106,340 @@ module.exports = {
   getRiwayatPasienByRM,
 };
 
+--- FILE: src\services\satusehat.service.js ---
+const axios = require('axios');
+const satusehatConfig = require('../config/satusehat');
+const { createFhirClient, generateAccessToken } = require('../utils/satusehat-client');
+
+const getPatientByNIK = async (nik) => {
+  try {
+    const fhirClient = await createFhirClient();
+
+    const response = await fhirClient.get(`/Patient?identifier=https://fhir.kemkes.go.id/id/nik|${nik}`);
+
+    if (response.data && response.data.entry && response.data.entry.length > 0) {
+      const patient = response.data.entry[0].resource;
+
+      const ihsNumber = patient.id;
+
+      return {
+        success: true,
+        data: patient,
+        ihsNumber: ihsNumber
+      };
+    } else {
+      return {
+        success: false,
+        message: 'Pasien tidak ditemukan di SATUSEHAT'
+      };
+    }
+  } catch (error) {
+    console.error(`[SATUSEHAT] Error searching patient by NIK ${nik}:`, error.response?.data || error.message);
+    throw new Error('Terjadi kesalahan saat mencari pasien di SATUSEHAT');
+  }
+};
+
+const getPractitionerByNIK = async (nik) => {
+  try {
+    const fhirClient = await createFhirClient();
+
+    const response = await fhirClient.get(`/Practitioner?identifier=https://fhir.kemkes.go.id/id/nik|${nik}`);
+
+    if (response.data && response.data.entry && response.data.entry.length > 0) {
+      const practitioner = response.data.entry[0].resource;
+
+      const ihsNumber = practitioner.id;
+
+      return {
+        success: true,
+        data: practitioner,
+        ihsNumber: ihsNumber
+      };
+    } else {
+      return {
+        success: false,
+        message: 'Tenaga Medis tidak ditemukan di SATUSEHAT'
+      };
+    }
+  } catch (error) {
+    console.error(`[SATUSEHAT] Error searching practitioner by NIK ${nik}:`, error.response?.data || error.message);
+    throw new Error('Terjadi kesalahan saat mencari tenaga medis di SATUSEHAT');
+  }
+};
+
+const { buildLocationPayload } = require('../utils/fhir-mappers/location.mapper');
+const { buildEncounterPayload } = require('../utils/fhir-mappers/encounter.mapper');
+const { buildObservationPayload } = require('../utils/fhir-mappers/observation.mapper');
+const { buildConditionPayload } = require('../utils/fhir-mappers/condition.mapper');
+const { buildMedicationPayload, buildMedicationRequestPayload } = require('../utils/fhir-mappers/medication.mapper');
+const { buildProcedurePayload } = require('../utils/fhir-mappers/procedure.mapper');
+const { buildAllergyPayload } = require('../utils/fhir-mappers/allergy.mapper');
+const { buildMedicationDispensePayload } = require('../utils/fhir-mappers/medication-dispense.mapper');
+
+const createLocation = async (poliklinik) => {
+  try {
+    const fhirClient = await createFhirClient();
+    const orgId = satusehatConfig.SATUSEHAT_ORG_ID;
+
+    if (!orgId) {
+      throw new Error('SATUSEHAT_ORG_ID belum dikonfigurasi di file .env');
+    }
+
+    const payload = buildLocationPayload(poliklinik, orgId);
+
+    const response = await fhirClient.post('/Location', payload);
+
+    return {
+      success: true,
+      data: response.data,
+      ihsLocationId: response.data.id
+    };
+  } catch (error) {
+    console.error(`[SATUSEHAT] Error creating location for poli ${poliklinik.namaPoli}:`, error.response?.data || error.message);
+    throw new Error(error.response?.data?.issue?.[0]?.diagnostics || 'Terjadi kesalahan saat mendaftarkan lokasi ke SATUSEHAT');
+  }
+};
+
+const createEncounter = async (data) => {
+  try {
+    const fhirClient = await createFhirClient();
+    const orgId = satusehatConfig.SATUSEHAT_ORG_ID;
+
+    if (!orgId) {
+      throw new Error('SATUSEHAT_ORG_ID belum dikonfigurasi di file .env');
+    }
+
+    const payload = buildEncounterPayload(data, orgId);
+
+    console.log("[SATUSEHAT] Mengirim Encounter Payload:", JSON.stringify(payload, null, 2));
+
+    const response = await fhirClient.post('/Encounter', payload);
+
+    return {
+      success: true,
+      data: response.data,
+      encounterId: response.data.id
+    };
+  } catch (error) {
+    console.error(`[SATUSEHAT] Error creating encounter:`, error.response?.data ? JSON.stringify(error.response?.data, null, 2) : error.message);
+    throw new Error(error.response?.data?.issue?.[0]?.diagnostics || 'Terjadi kesalahan saat membuat Encounter ke SATUSEHAT');
+  }
+};
+
+const createCondition = async (data) => {
+  try {
+    const fhirClient = await createFhirClient();
+
+    const payload = buildConditionPayload(data);
+
+    console.log("[SATUSEHAT] Mengirim Condition Payload:", JSON.stringify(payload, null, 2));
+
+    const response = await fhirClient.post('/Condition', payload);
+
+    return {
+      success: true,
+      data: response.data,
+      conditionId: response.data.id
+    };
+  } catch (error) {
+    console.error(`[SATUSEHAT] Error creating condition for ICD-10 ${data.kodeIcd10}:`, error.response?.data ? JSON.stringify(error.response?.data, null, 2) : error.message);
+    throw new Error(error.response?.data?.issue?.[0]?.diagnostics || 'Terjadi kesalahan saat mengirim Condition ke SATUSEHAT');
+  }
+};
+
+const createObservation = async (data) => {
+  const fhirClient = await createFhirClient();
+  const orgId = satusehatConfig.SATUSEHAT_ORG_ID;
+
+  if (!orgId) {
+    throw new Error('SATUSEHAT_ORG_ID belum dikonfigurasi di file .env');
+  }
+
+  const payload = buildObservationPayload(data);
+
+  console.log("[SATUSEHAT] Mengirim Observation Payload:", JSON.stringify(payload, null, 2));
+
+  const response = await fhirClient.post('/Observation', payload);
+
+  return {
+    success: true,
+    data: response.data,
+    observationId: response.data.id
+  };
+};
+
+const createPrescription = async (data) => {
+  const fhirClient = await createFhirClient();
+  const orgId = satusehatConfig.SATUSEHAT_ORG_ID;
+
+  if (!orgId) {
+    throw new Error('SATUSEHAT_ORG_ID belum dikonfigurasi di file .env');
+  }
+
+  const uniqueMedReqId = data.resepDetailId ? `${data.resepDetailId}-req` : null;
+  const medicationPayload = buildMedicationPayload(data, orgId, uniqueMedReqId);
+  console.log("[SATUSEHAT] Mengirim Medication Payload:", JSON.stringify(medicationPayload, null, 2));
+  let medicationId;
+  try {
+    const medResponse = await fhirClient.post('/Medication', medicationPayload);
+    medicationId = medResponse.data.id;
+  } catch (error) {
+    console.error(`[SATUSEHAT] Error creating Medication untuk ${data.kodeObat}:`, error.response?.data ? JSON.stringify(error.response?.data, null, 2) : error.message);
+    throw new Error(error.response?.data?.issue?.[0]?.diagnostics || 'Terjadi kesalahan saat mengirim Medication ke SATUSEHAT');
+  }
+
+  const medReqPayload = buildMedicationRequestPayload(data, medicationId, orgId);
+  console.log("[SATUSEHAT] Mengirim MedicationRequest Payload:", JSON.stringify(medReqPayload, null, 2));
+
+  try {
+    const reqResponse = await fhirClient.post('/MedicationRequest', medReqPayload);
+    return {
+      success: true,
+      medicationId: medicationId,
+      medicationRequestId: reqResponse.data.id
+    };
+  } catch (error) {
+    console.error(`[SATUSEHAT] Error creating MedicationRequest untuk ${data.kodeObat}:`, error.response?.data ? JSON.stringify(error.response?.data, null, 2) : error.message);
+    throw new Error(error.response?.data?.issue?.[0]?.diagnostics || 'Terjadi kesalahan saat mengirim MedicationRequest ke SATUSEHAT');
+  }
+};
+
+const createProcedure = async (data) => {
+  try {
+    const fhirClient = await createFhirClient();
+    const orgId = satusehatConfig.SATUSEHAT_ORG_ID;
+
+    if (!orgId) {
+      throw new Error('SATUSEHAT_ORG_ID belum dikonfigurasi di file .env');
+    }
+
+    const payload = buildProcedurePayload(data, orgId);
+
+    console.log("[SATUSEHAT] Mengirim Procedure Payload:", JSON.stringify(payload, null, 2));
+
+    const response = await fhirClient.post('/Procedure', payload);
+
+    return {
+      success: true,
+      data: response.data,
+      procedureId: response.data.id
+    };
+  } catch (error) {
+    console.error(`[SATUSEHAT] Error creating procedure for ICD-9 ${data.kodeIcd9}:`, error.response?.data ? JSON.stringify(error.response?.data, null, 2) : error.message);
+    throw new Error(error.response?.data?.issue?.[0]?.diagnostics || 'Terjadi kesalahan saat mengirim Procedure ke SATUSEHAT');
+  }
+};
+
+const createAllergyIntolerance = async (pasien, dokter, kunjungan, alergiPasien) => {
+  try {
+    const fhirClient = await createFhirClient();
+    const orgId = satusehatConfig.SATUSEHAT_ORG_ID;
+
+    if (!orgId) {
+      throw new Error('SATUSEHAT_ORG_ID belum dikonfigurasi di file .env');
+    }
+
+    const payload = buildAllergyPayload(orgId, pasien, dokter, kunjungan, alergiPasien);
+
+    console.log("[SATUSEHAT] Mengirim AllergyIntolerance Payload:", JSON.stringify(payload, null, 2));
+
+    const response = await fhirClient.post('/AllergyIntolerance', payload);
+
+    return {
+      success: true,
+      data: response.data,
+      allergyId: response.data.id
+    };
+  } catch (error) {
+    console.error(`[SATUSEHAT] Error creating AllergyIntolerance for ${alergiPasien.alergiMaster?.nama_alergi}:`, error.response?.data ? JSON.stringify(error.response?.data, null, 2) : error.message);
+    throw new Error(error.response?.data?.issue?.[0]?.diagnostics || 'Terjadi kesalahan saat mengirim AllergyIntolerance ke SATUSEHAT');
+  }
+};
+
+const searchKFA = async (keyword) => {
+  try {
+    const token = await generateAccessToken();
+    const url = `${satusehatConfig.SATUSEHAT_URL.KFA_URL}/products/all`;
+
+    const response = await axios.get(url, {
+      params: {
+        product_type: 'farmasi',
+        keyword,
+        page: 1,
+        size: 50
+      },
+      headers: {
+        'Authorization': `Bearer ${token}`
+      }
+    });
+
+    return {
+      success: true,
+      data: response.data
+    };
+  } catch (error) {
+    console.error('[SATUSEHAT] Error searching KFA:', error.response?.data || error.message);
+    throw new Error('Terjadi kesalahan saat mencari data di KFA SATUSEHAT');
+  }
+};
+
+const postMedicationDispense = async (data) => {
+  const fhirClient = await createFhirClient();
+  const orgId = satusehatConfig.SATUSEHAT_ORG_ID;
+
+  if (!orgId) {
+    throw new Error('SATUSEHAT_ORG_ID belum dikonfigurasi di file .env');
+  }
+
+  const uniqueMedDispId = data.resepDetailId ? `${data.resepDetailId}-disp` : null;
+  const medicationPayload = buildMedicationPayload(data, orgId, uniqueMedDispId);
+  console.log("[SATUSEHAT] Mengirim Medication (Dispense) Payload:", JSON.stringify(medicationPayload, null, 2));
+  let medicationId;
+  try {
+    const medResponse = await fhirClient.post('/Medication', medicationPayload);
+    medicationId = medResponse.data.id;
+  } catch (error) {
+    console.error(`[SATUSEHAT] Error creating Medication (Dispense) untuk ${data.kodeObat}:`, error.response?.data ? JSON.stringify(error.response?.data, null, 2) : error.message);
+    throw new Error(error.response?.data?.issue?.[0]?.diagnostics || 'Terjadi kesalahan saat mengirim Medication (Dispense) ke SATUSEHAT');
+  }
+
+  const dispensePayload = buildMedicationDispensePayload(data, medicationId, orgId);
+  console.log("[SATUSEHAT] Mengirim MedicationDispense Payload:", JSON.stringify(dispensePayload, null, 2));
+
+  try {
+    const response = await fhirClient.post('/MedicationDispense', dispensePayload);
+    return {
+      success: true,
+      medicationId: medicationId,
+      medicationDispenseId: response.data.id
+    };
+  } catch (error) {
+    console.error(`[SATUSEHAT] Error creating MedicationDispense untuk ${data.kodeObat}:`, error.response?.data ? JSON.stringify(error.response?.data, null, 2) : error.message);
+    throw new Error(error.response?.data?.issue?.[0]?.diagnostics || 'Terjadi kesalahan saat mengirim MedicationDispense ke SATUSEHAT');
+  }
+};
+
+module.exports = {
+  generateAccessToken,
+  createFhirClient,
+  getPatientByNIK,
+  getPractitionerByNIK,
+  createLocation,
+  createEncounter,
+  createObservation,
+  createCondition,
+  createPrescription,
+  createProcedure,
+  createAllergyIntolerance,
+  searchKFA,
+  postMedicationDispense
+};
+
 --- FILE: src\services\screening.service.js ---
 const prisma = require('../config/prisma');
 
 const createScreening = async (data, petugasId) => {
-  return await prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
 
     const dataTambahan = {
 
@@ -4818,6 +7546,181 @@ const createScreening = async (data, petugasId) => {
 
     return screening;
   });
+
+  sendObservationToSatuSehat(result.id).catch(err => console.error(err));
+
+  return result;
+};
+
+const sendObservationToSatuSehat = async (screeningId) => {
+  const satusehatService = require('./satusehat.service');
+  try {
+    const screening = await prisma.screening.findUnique({
+      where: { id: screeningId },
+      include: {
+        kunjungan: {
+          include: {
+            pasien: true,
+            dokterTujuan: {
+              include: { tenagaMedis: true }
+            }
+          }
+        }
+      }
+    });
+
+    if (!screening || !screening.kunjungan || !screening.kunjungan.encounterId) {
+      console.log('Tidak dapat sinkron Observation: Encounter ID belum ada');
+      return;
+    }
+
+    const { kunjungan } = screening;
+    const { pasien, dokterTujuan } = kunjungan;
+
+    if (!pasien.noIHS || !dokterTujuan?.tenagaMedis?.noIHS) {
+      console.log('Tidak dapat sinkron Observation: IHS Pasien/Dokter belum lengkap');
+      return;
+    }
+
+    const basePayload = {
+      pasienIhs: pasien.noIHS,
+      pasienName: pasien.namaLengkap,
+      dokterIhs: dokterTujuan.tenagaMedis.noIHS,
+      dokterName: dokterTujuan.namaLengkap,
+      encounterId: kunjungan.encounterId,
+    };
+
+    const observationIds = [];
+
+    if (screening.suhuTubuh) {
+      const res = await satusehatService.createObservation({
+        ...basePayload,
+        loincCode: "8310-5",
+        loincDisplay: "Body temperature",
+        value: screening.suhuTubuh,
+        unit: "C",
+        unitCode: "Cel"
+      }).catch(e => console.error("Error Suhu:", e.message));
+      if (res && res.success) observationIds.push({ type: 'Suhu', id: res.observationId });
+    }
+
+    if (screening.nadi) {
+      const res = await satusehatService.createObservation({
+        ...basePayload,
+        loincCode: "8867-4",
+        loincDisplay: "Heart rate",
+        value: screening.nadi,
+        unit: "beats/minute",
+        unitCode: "/min"
+      }).catch(e => console.error("Error Nadi:", e.message));
+      if (res && res.success) observationIds.push({ type: 'Nadi', id: res.observationId });
+    }
+
+    if (screening.saturasiOksigen) {
+      const res = await satusehatService.createObservation({
+        ...basePayload,
+        loincCode: "2708-6",
+        loincDisplay: "Oxygen saturation in Arterial blood",
+        value: screening.saturasiOksigen,
+        unit: "%",
+        unitCode: "%"
+      }).catch(e => console.error("Error SpO2:", e.message));
+      if (res && res.success) observationIds.push({ type: 'SpO2', id: res.observationId });
+    }
+
+    if (screening.tekananDarahSistolik && screening.tekananDarahDiastolik) {
+      const res = await satusehatService.createObservation({
+        ...basePayload,
+        loincCode: "85354-9",
+        loincDisplay: "Blood pressure panel with all children optional",
+        components: [
+          {
+            code: {
+              coding: [{ system: "http://loinc.org", code: "8480-6", display: "Systolic blood pressure" }]
+            },
+            valueQuantity: { value: screening.tekananDarahSistolik, unit: "mm[Hg]", system: "http://unitsofmeasure.org", code: "mm[Hg]" }
+          },
+          {
+            code: {
+              coding: [{ system: "http://loinc.org", code: "8462-4", display: "Diastolic blood pressure" }]
+            },
+            valueQuantity: { value: screening.tekananDarahDiastolik, unit: "mm[Hg]", system: "http://unitsofmeasure.org", code: "mm[Hg]" }
+          }
+        ]
+      }).catch(e => console.error("Error Tensi:", e.message));
+      if (res && res.success) observationIds.push({ type: 'Tekanan Darah', id: res.observationId });
+    }
+
+    if (screening.frekuensiNapas) {
+      const res = await satusehatService.createObservation({
+        ...basePayload,
+        loincCode: "9279-1",
+        loincDisplay: "Respiratory rate",
+        value: screening.frekuensiNapas,
+        unit: "breaths/minute",
+        unitCode: "/min"
+      }).catch(e => console.error("Error Napas:", e.message));
+      if (res && res.success) observationIds.push({ type: 'Napas', id: res.observationId });
+    }
+
+    if (screening.tinggiBadan) {
+      const res = await satusehatService.createObservation({
+        ...basePayload,
+        loincCode: "8302-2",
+        loincDisplay: "Body height",
+        value: screening.tinggiBadan,
+        unit: "cm",
+        unitCode: "cm"
+      }).catch(e => console.error("Error Tinggi:", e.message));
+      if (res && res.success) observationIds.push({ type: 'Tinggi Badan', id: res.observationId });
+    }
+
+    if (screening.beratBadan) {
+      const res = await satusehatService.createObservation({
+        ...basePayload,
+        loincCode: "29463-7",
+        loincDisplay: "Body weight",
+        value: screening.beratBadan,
+        unit: "kg",
+        unitCode: "kg"
+      }).catch(e => console.error("Error Berat:", e.message));
+      if (res && res.success) observationIds.push({ type: 'Berat Badan', id: res.observationId });
+    }
+
+    if (screening.lingkarPerut) {
+      const res = await satusehatService.createObservation({
+        ...basePayload,
+        loincCode: "8280-0",
+        loincDisplay: "Waist Circumference at umbilicus by Tape measure",
+        value: screening.lingkarPerut,
+        unit: "cm",
+        unitCode: "cm"
+      }).catch(e => console.error("Error Lingkar Perut:", e.message));
+      if (res && res.success) observationIds.push({ type: 'Lingkar Perut', id: res.observationId });
+    }
+
+    if (observationIds.length > 0) {
+      await prisma.screening.update({
+        where: { id: screeningId },
+        data: { observationIds: observationIds }
+      });
+
+      const syncStatus = (typeof kunjungan.satusehatSync === 'object' && kunjungan.satusehatSync !== null)
+        ? { ...kunjungan.satusehatSync }
+        : {};
+
+      syncStatus.Observation = { status: 'SUCCESS', detail: `Sent ${observationIds.length} observations` };
+
+      await prisma.kunjungan.update({
+        where: { id: kunjungan.id },
+        data: { satusehatSync: syncStatus }
+      });
+
+      console.log('Berhasil sinkron Observation TTV ke SATUSEHAT:', observationIds);
+    }
+  } catch (err) {
+    console.error('Gagal sinkron Observation TTV:', err.message);
+  }
 };
 
 const getScreeningByKunjungan = async (kunjunganId) => {
@@ -4833,14 +7736,20 @@ module.exports = {
 
 --- FILE: src\services\ukm.service.js ---
 const prisma = require('../config/prisma');
+const EpisodeOfCareMapper = require('./satusehat/episodeOfCare.mapper');
+const SatuSehatGateway = require('./satusehat/gateway.service');
 
 const autoRegisterUKM = async (pasienId, icd10Kode) => {
   let programKode = null;
+
+  let diagnosaAwalLokal = icd10Kode;
 
   if (icd10Kode.startsWith('B20')) {
     programKode = 'HIV';
   } else if (icd10Kode.startsWith('A15')) {
     programKode = 'TB';
+  } else if (icd10Kode.startsWith('Z34')) {
+    programKode = 'KIA';
   }
 
   if (!programKode) return null;
@@ -4864,14 +7773,15 @@ const autoRegisterUKM = async (pasienId, icd10Kode) => {
       data: {
         pasienId,
         programId: program.id,
-        statusProgram: 'AKTIF'
+        statusProgram: 'AKTIF',
+        diagnosaAwal: diagnosaAwalLokal
       }
     });
 
     await prisma.logPemantauanUKM.create({
       data: {
         registerId: newRegister.id,
-        catatan: `Pasien didaftarkan otomatis ke Program ${programKode} melalui diagnosa Rawat Jalan.`
+        catatan: `Pasien didaftarkan otomatis ke Program ${programKode} melalui diagnosa Rawat Jalan. Status integrasi SATUSEHAT: Menunggu Sync.`
       }
     });
 
@@ -4946,7 +7856,7 @@ const addLogPemantauan = async (registerId, data, petugasId) => {
   try {
     const parsedCatatan = JSON.parse(data.catatan);
     if (parsedCatatan.arvKepatuhan) {
-      const register = await prisma.registerUKM.findUnique({where: {id: registerId}});
+      const register = await prisma.registerUKM.findUnique({ where: { id: registerId } });
       if (register) {
 
         let poliklinik = await prisma.poliklinik.findFirst({ where: { namaPoli: { contains: 'UKM' } } });
@@ -5004,12 +7914,724 @@ const addLogPemantauan = async (registerId, data, petugasId) => {
   return log;
 };
 
+const syncEpisodeOfCare = async (registerId) => {
+
+  const pendaftaranLokal = await prisma.registerUKM.findUnique({
+    where: { id: registerId },
+    include: {
+      pasien: true,
+      program: true
+    }
+  });
+
+  if (!pendaftaranLokal) {
+    throw new Error('Data pendaftaran UKM tidak ditemukan.');
+  }
+
+  if (pendaftaranLokal.satusehatEpisodeId) {
+    throw new Error('Data program ini sudah disinkronisasikan ke SATUSEHAT sebelumnya.');
+  }
+
+  let conditionIdDariPusat = pendaftaranLokal.satusehatConditionId;
+
+  if (!conditionIdDariPusat) {
+    const conditionPayload = EpisodeOfCareMapper.toCondition(pendaftaranLokal);
+    const conditionRes = await SatuSehatGateway.postResource('Condition', conditionPayload);
+
+    conditionIdDariPusat = conditionRes.id;
+
+    await prisma.registerUKM.update({
+      where: { id: registerId },
+      data: { satusehatConditionId: conditionIdDariPusat }
+    });
+  }
+
+  const episodePayload = EpisodeOfCareMapper.toEpisodeOfCare(pendaftaranLokal, conditionIdDariPusat);
+  const episodeRes = await SatuSehatGateway.postResource('EpisodeOfCare', episodePayload);
+
+  const updatedRegister = await prisma.registerUKM.update({
+    where: { id: registerId },
+    data: {
+      satusehatEpisodeId: episodeRes.id
+    }
+  });
+
+  return {
+    pesan: "Sinkronisasi EpisodeOfCare Berhasil",
+    satusehatConditionId: updatedRegister.satusehatConditionId,
+    satusehatEpisodeId: updatedRegister.satusehatEpisodeId
+  };
+};
+
 module.exports = {
   autoRegisterUKM,
   getDashboardStats,
   getPasienByProgram,
-  addLogPemantauan
+  addLogPemantauan,
+  syncEpisodeOfCare
 };
+
+--- FILE: src\services\bpjs\gateway.service.js ---
+'use strict';
+
+const axios = require('axios');
+const bpjsConfig = require('../../config/bpjs');
+const BpjsCrypto = require('../../utils/bpjs-crypto');
+
+class BpjsGateway {
+
+  static _buildHeaders() {
+    const { BPJS_CONS_ID, BPJS_SECRET_KEY, BPJS_USER_KEY } = bpjsConfig;
+
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+
+    const signature = BpjsCrypto.generateSignature(BPJS_CONS_ID, BPJS_SECRET_KEY, timestamp);
+
+    const basicAuth = Buffer.from(`${BPJS_CONS_ID}:${BPJS_USER_KEY}`).toString('base64');
+
+    return {
+      'X-cons-id': BPJS_CONS_ID,
+      'X-timestamp': timestamp,
+      'X-signature': signature,
+      'user_key': BPJS_USER_KEY,
+      'Authorization': `Basic ${basicAuth}`,
+      'Content-Type': 'application/json',
+    };
+  }
+
+  static async get(endpoint) {
+    try {
+      const url = `${bpjsConfig.BPJS_BASE_URL}${endpoint}`;
+      const response = await axios.get(url, {
+        headers: this._buildHeaders(),
+        timeout: 15000,
+      });
+      return response.data;
+    } catch (error) {
+      this._handleError(error, `GET ${endpoint}`);
+    }
+  }
+
+  static async post(endpoint, body) {
+    try {
+      const url = `${bpjsConfig.BPJS_BASE_URL}${endpoint}`;
+      const response = await axios.post(url, body, {
+        headers: this._buildHeaders(),
+        timeout: 15000,
+      });
+      return response.data;
+    } catch (error) {
+      this._handleError(error, `POST ${endpoint}`);
+    }
+  }
+
+  static _handleError(error, action) {
+
+    if (error.response) {
+      console.error(`[BPJS Gateway] ${action} Error (HTTP ${error.response.status}):`, error.response.data);
+      const err = new Error(`BPJS PCare: Gagal melakukan ${action}. Status: ${error.response.status}`);
+      err.statusCode = 502;
+      err.bpjsDetail = error.response.data;
+      throw err;
+    }
+
+    if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT' || !error.response) {
+      console.error(`[BPJS Gateway] ${action} Timeout/Network Error:`, error.message);
+      const err = new Error(`BPJS PCare: Koneksi timeout atau tidak terjangkau saat ${action}`);
+      err.statusCode = 504;
+      throw err;
+    }
+
+    console.error(`[BPJS Gateway] ${action} Unknown Error:`, error.message);
+    const err = new Error(`BPJS PCare: Error tidak dikenal saat ${action}`);
+    err.statusCode = 500;
+    throw err;
+  }
+}
+
+module.exports = BpjsGateway;
+
+--- FILE: src\services\bpjs\pcare.service.js ---
+'use strict';
+
+const BpjsGateway = require('./gateway.service');
+const BpjsCrypto = require('../../utils/bpjs-crypto');
+const bpjsConfig = require('../../config/bpjs');
+
+class PCareService {
+
+  static async cekPesertaByNoKartu(noBpjs) {
+
+    const rawResponse = await BpjsGateway.get(`/peserta/nokartu/${noBpjs}`);
+
+    if (!rawResponse || !rawResponse.response) {
+      const err = new Error('BPJS PCare: Respon kosong atau tidak valid untuk data peserta.');
+      err.statusCode = 502;
+      throw err;
+    }
+
+    const pesertaData = BpjsCrypto.decryptAndDecompress(
+      rawResponse.response,
+      bpjsConfig.BPJS_USER_KEY
+    );
+
+    const peserta = pesertaData?.peserta;
+    if (!peserta) {
+      const err = new Error('BPJS PCare: Nomor kartu tidak ditemukan di database BPJS.');
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const isAktif = peserta.kdStatusPeserta === '1';
+
+    return {
+      aktif: isAktif,
+      statusLabel: isAktif ? 'AKTIF' : 'NON AKTIF',
+      noBpjs: peserta.noKartu,
+      nik: peserta.nik,
+      nama: peserta.nama,
+      tglLahir: peserta.tglLahir,
+      kdJenisPeserta: peserta.kdJenisPeserta,
+      namaJenisPeserta: peserta.jenisPeserta,
+      kdStatusPeserta: peserta.kdStatusPeserta,
+
+      kdPPK: peserta.kdProviderPst?.kdProvider,
+      namaPPK: peserta.kdProviderPst?.nmProvider,
+      isRegisteredHere: peserta.kdProviderPst?.kdProvider === bpjsConfig.BPJS_KODE_FASKES,
+
+      kelasRawat: peserta.kdRawat,
+      namaKelas: peserta.jnsRawat,
+      rawData: pesertaData,
+    };
+  }
+
+  static async daftarkanKunjungan(kunjunganData) {
+    const {
+      noBpjs,
+      tanggalRegistrasi,
+      kdPoliTujuan,
+      noRM,
+      kdSakit = 'A00.0',
+    } = kunjunganData;
+
+    const payload = {
+      noKartu: noBpjs,
+      tglDaftar: tanggalRegistrasi,
+      kdPoli: kdPoliTujuan,
+      kdFaskes: bpjsConfig.BPJS_KODE_FASKES,
+      noMR: noRM,
+      kdSakit: kdSakit,
+      sistole: 0,
+      diastole: 0,
+      beratBadan: 0,
+      tinggiBadan: 0,
+      respRate: 0,
+      heartRate: 0,
+      lingkarPerut: 0,
+      imt: 0,
+      suhu: 0,
+    };
+
+    const rawResponse = await BpjsGateway.post('/kunjungan', payload);
+
+    if (!rawResponse || !rawResponse.response) {
+      const err = new Error('BPJS PCare: Respon pendaftaran kunjungan kosong atau tidak valid.');
+      err.statusCode = 502;
+      throw err;
+    }
+
+    const kunjunganResult = BpjsCrypto.decryptAndDecompress(
+      rawResponse.response,
+      bpjsConfig.BPJS_USER_KEY
+    );
+
+    return {
+      noKunjungan: kunjunganResult?.kunjungan?.noKunjungan || kunjunganResult?.noKunjungan,
+      noUrut: kunjunganResult?.kunjungan?.noUrut || kunjunganResult?.noUrut,
+      rawData: kunjunganResult,
+    };
+  }
+
+  static validateConfig() {
+    const { BPJS_CONS_ID, BPJS_SECRET_KEY, BPJS_USER_KEY, BPJS_KODE_FASKES } = bpjsConfig;
+    if (!BPJS_CONS_ID || !BPJS_SECRET_KEY || !BPJS_USER_KEY || !BPJS_KODE_FASKES) {
+      const err = new Error(
+        'Konfigurasi BPJS tidak lengkap. Pastikan BPJS_CONS_ID, BPJS_SECRET_KEY, BPJS_USER_KEY, dan BPJS_KODE_FASKES sudah diisi di file .env'
+      );
+      err.statusCode = 503;
+      throw err;
+    }
+  }
+}
+
+module.exports = PCareService;
+
+--- FILE: src\services\satusehat\episodeOfCare.mapper.js ---
+
+class EpisodeOfCareMapper {
+
+    static _getProgramTerminology(kodeProgram, diagnosaAwalLokal) {
+
+        switch (kodeProgram) {
+            case 'TB':
+                return {
+                    code: diagnosaAwalLokal || 'A15.0',
+                    display: 'Tuberkulosis paru, terkonfirmasi secara bakteriologis dan histologis'
+                };
+            case 'HIV':
+                return {
+                    code: diagnosaAwalLokal || 'B20',
+                    display: 'Penyakit infeksi human immunodeficiency virus [HIV]'
+                };
+            case 'KIA':
+                return {
+                    code: diagnosaAwalLokal || 'Z34',
+                    display: 'Pengawasan kehamilan normal'
+                };
+            default:
+                throw new Error(`Program ${kodeProgram} belum didukung oleh Mapper EpisodeOfCare.`);
+        }
+    }
+
+    static toCondition(dataLokal) {
+
+        if (!dataLokal.pasien?.noIHS) {
+            throw new Error('INTEGRITY ERROR: Pasien belum memiliki nomor IHS (SatuSehat ID).');
+        }
+
+        const term = this._getProgramTerminology(dataLokal.program.kodeProgram, dataLokal.diagnosaAwal);
+
+        return {
+            resourceType: "Condition",
+
+            clinicalStatus: {
+                coding: [
+                    {
+                        system: "http://terminology.hl7.org/CodeSystem/condition-clinical",
+                        code: "active",
+                        display: "Active"
+                    }
+                ]
+            },
+
+            category: [
+                {
+                    coding: [
+                        {
+                            system: "http://terminology.hl7.org/CodeSystem/condition-category",
+                            code: "problem-list-item",
+                            display: "Problem List Item"
+                        }
+                    ]
+                }
+            ],
+
+            code: {
+                coding: [
+                    {
+                        system: "http://hl7.org/fhir/sid/icd-10",
+                        code: term.code,
+                        display: term.display
+                    }
+                ]
+            },
+
+            subject: {
+                reference: `Patient/${dataLokal.pasien.noIHS}`,
+                display: dataLokal.pasien.namaLengkap
+            },
+
+            recordedDate: dataLokal.tanggalDaftar.toISOString()
+        };
+    }
+
+    static toEpisodeOfCare(dataLokal, satusehatConditionId) {
+
+        if (!dataLokal.pasien?.noIHS) {
+            throw new Error('INTEGRITY ERROR: Pasien belum memiliki nomor IHS (SatuSehat ID).');
+        }
+        if (!process.env.SATUSEHAT_ORG_ID) {
+            throw new Error('SYSTEM ERROR: SATUSEHAT_ORG_ID belum di-set di file .env');
+        }
+        if (!satusehatConditionId) {
+            throw new Error('INTEGRITY ERROR: ID Condition dari SATUSEHAT wajib dilampirkan.');
+        }
+
+        let fhirStatus = "active";
+        if (dataLokal.statusProgram === "SEMBUH" || dataLokal.statusProgram === "MENINGGAL") fhirStatus = "finished";
+        if (dataLokal.statusProgram === "PUTUS_OBAT") fhirStatus = "cancelled";
+        if (dataLokal.statusProgram === "RUJUK") fhirStatus = "finished";
+
+        return {
+            resourceType: "EpisodeOfCare",
+            status: fhirStatus,
+            statusHistory: [
+                {
+                    status: fhirStatus,
+                    period: {
+                        start: dataLokal.tanggalDaftar.toISOString()
+
+                    }
+                }
+            ],
+
+            patient: {
+                reference: `Patient/${dataLokal.pasien.noIHS}`,
+                display: dataLokal.pasien.namaLengkap
+            },
+
+            managingOrganization: {
+                reference: `Organization/${process.env.SATUSEHAT_ORG_ID}`
+            },
+            period: {
+                start: dataLokal.tanggalDaftar.toISOString()
+            },
+
+            diagnosis: [
+                {
+                    condition: {
+                        reference: `Condition/${satusehatConditionId}`
+                    },
+                    role: {
+                        coding: [
+                            {
+                                system: "http://terminology.hl7.org/CodeSystem/diagnosis-role",
+                                code: "CC",
+                                display: "Chief complaint"
+                            }
+                        ]
+                    },
+                    rank: 1
+                }
+            ]
+        };
+    }
+}
+
+module.exports = EpisodeOfCareMapper;
+
+--- FILE: src\services\satusehat\gateway.service.js ---
+const axios = require('axios');
+
+class SatuSehatGateway {
+
+    static accessToken = null;
+    static tokenExpiresAt = null;
+
+    static async getAccessToken() {
+        const now = Date.now();
+
+        if (this.accessToken && this.tokenExpiresAt && now < this.tokenExpiresAt - 120000) {
+            return this.accessToken;
+        }
+
+        try {
+
+            const data = new URLSearchParams();
+            data.append('client_id', process.env.SATUSEHAT_CLIENT_ID);
+            data.append('client_secret', process.env.SATUSEHAT_CLIENT_SECRET);
+
+            const response = await axios.post(process.env.SATUSEHAT_AUTH_URL, data, {
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+            });
+
+            this.accessToken = response.data.access_token;
+
+            this.tokenExpiresAt = now + (response.data.expires_in * 1000);
+
+            return this.accessToken;
+        } catch (error) {
+            console.error('SATUSEHAT Auth Error:', error.response?.data || error.message);
+            const err = new Error('Gagal mendapatkan token autentikasi dari SATUSEHAT');
+            err.statusCode = 502;
+            throw err;
+        }
+    }
+
+    static async postResource(resourceType, payload) {
+        try {
+            const token = await this.getAccessToken();
+            const baseUrl = process.env.SATUSEHAT_BASE_URL;
+
+            const response = await axios.post(`${baseUrl}/${resourceType}`, payload, {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                },
+            });
+
+            return response.data;
+        } catch (error) {
+            this._handleError(error, `POST ${resourceType}`);
+        }
+    }
+
+    static async putResource(resourceType, id, payload) {
+        try {
+            const token = await this.getAccessToken();
+            const baseUrl = process.env.SATUSEHAT_BASE_URL;
+
+            const response = await axios.put(`${baseUrl}/${resourceType}/${id}`, payload, {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                },
+            });
+
+            return response.data;
+        } catch (error) {
+            this._handleError(error, `PUT ${resourceType}`);
+        }
+    }
+
+    static _handleError(error, action) {
+        console.error(`SATUSEHAT ${action} Error:`, error.response?.data || error.message);
+
+        const err = new Error(`Gagal melakukan ${action} ke SATUSEHAT`);
+        err.statusCode = error.response?.status || 500;
+
+        err.details = error.response?.data;
+
+        throw err;
+    }
+}
+
+module.exports = SatuSehatGateway;
+
+--- FILE: src\services\satusehat\imunisasi.mapper.js ---
+
+class SatuSehatMapper {
+
+    static toImmunization(data) {
+
+        if (!data.pasien?.noIHS) {
+            throw new Error('INTEGRITY ERROR: Pasien belum memiliki nomor IHS (SatuSehat ID).');
+        }
+
+        if (!data.isRiwayatLuar && !data.kunjungan?.satusehatId) {
+            throw new Error('INTEGRITY ERROR: Kunjungan (Encounter) belum tersinkronisasi dengan SATUSEHAT.');
+        }
+
+        const expDate = data.batchVaksin.tanggalExpired.toISOString().split('T')[0];
+
+        const fhirPayload = {
+            resourceType: "Immunization",
+            status: "completed",
+
+            vaccineCode: {
+                coding: [
+                    {
+                        system: "http://sys-ids.kemkes.go.id/kfa",
+                        code: data.batchVaksin.vaksin.kodeKfa,
+                        display: data.batchVaksin.vaksin.namaVaksin
+                    }
+                ]
+            },
+
+            patient: {
+                reference: `Patient/${data.pasien.noIHS}`,
+                display: data.pasien.namaLengkap
+            },
+
+            occurrenceDateTime: data.tanggalSuntik.toISOString(),
+
+            primarySource: !data.isRiwayatLuar,
+
+            lotNumber: data.batchVaksin.noBatch,
+            expirationDate: expDate,
+
+            protocolApplied: [
+                {
+                    targetDisease: [
+                        {
+                            coding: [
+                                {
+                                    system: "http://snomed.info/sct",
+
+                                    display: data.batchVaksin.vaksin.targetPenyakit || "Immunization"
+                                }
+                            ]
+                        }
+                    ],
+                    doseNumberPositiveInt: data.dosisKe
+                }
+            ]
+        };
+
+        if (!data.isRiwayatLuar && data.kunjungan?.satusehatId) {
+            fhirPayload.encounter = {
+                reference: `Encounter/${data.kunjungan.satusehatId}`
+            };
+        }
+
+        if (data.dosisJumlah) {
+            fhirPayload.doseQuantity = {
+                value: data.dosisJumlah,
+                unit: "mL",
+                system: "http://unitsofmeasure.org",
+                code: "mL"
+            };
+        }
+
+        if (data.lokasiSuntik) {
+            fhirPayload.site = {
+                coding: [{ system: "http://snomed.info/sct", code: data.lokasiSuntik }]
+            };
+        }
+
+        if (data.ruteSuntik) {
+            fhirPayload.route = {
+                coding: [{ system: "http://snomed.info/sct", code: data.ruteSuntik }]
+            };
+        }
+
+        if (!data.isRiwayatLuar && data.petugas) {
+            const practitionerIHS = data.petugas.noIHS || "N10000001";
+            fhirPayload.performer = [
+                {
+                    actor: {
+                        reference: `Practitioner/${practitionerIHS}`,
+                        display: data.petugas.namaLengkap
+                    }
+                }
+            ];
+        }
+
+        return fhirPayload;
+    }
+}
+
+module.exports = SatuSehatMapper;
+
+--- FILE: src\services\satusehat\mapper.service.js ---
+
+class SatuSehatMapper {
+
+    static toImagingStudy(data) {
+
+        if (!data.kunjungan.pasien.noIHS) {
+            throw new Error('INTEGRITY ERROR: Pasien belum memiliki nomor IHS dari SATUSEHAT.');
+        }
+        if (!data.kunjungan.satusehatId) {
+            throw new Error('INTEGRITY ERROR: Kunjungan (Encounter) belum disinkronkan ke SATUSEHAT.');
+        }
+
+        const fhirPayload = {
+            resourceType: "ImagingStudy",
+            status: "available",
+            subject: {
+                reference: `Patient/${data.kunjungan.pasien.noIHS}`,
+                display: data.kunjungan.pasien.namaLengkap
+            },
+            encounter: {
+                reference: `Encounter/${data.kunjungan.satusehatId}`
+            },
+            started: data.waktuPemeriksaan.toISOString(),
+
+            description: data.interpretasi || "Tidak ada interpretasi",
+
+            series: [
+                {
+                    uid: data.studyInstanceUid || "1.2.3.4.5.6.7.8.9",
+                    number: 1,
+                    modality: {
+                        system: "http://dicom.nema.org/resources/ontology/DCM",
+                        code: data.modality.kodeDicom,
+                        display: data.modality.namaModality
+                    },
+                    bodySite: {
+                        system: "http://snomed.info/sct",
+
+                        code: "51185008",
+                        display: data.bodySite || "Chest"
+                    },
+                    instance: [
+                        {
+                            uid: `${data.studyInstanceUid || "1.2.3.4"}.1`,
+                            sopClass: {
+                                system: "urn:ietf:rfc:3986",
+                                code: "urn:oid:1.2.840.10008.5.1.4.1.1.1"
+                            },
+                            title: `Gambar ${data.modality.kodeDicom} - ${data.kunjungan.pasien.namaLengkap}`
+                        }
+                    ]
+                }
+            ]
+        };
+
+        return fhirPayload;
+    }
+}
+
+module.exports = SatuSehatMapper;
+
+--- FILE: src\utils\bpjs-crypto.js ---
+'use strict';
+
+const crypto = require('crypto');
+const LZString = require('lz-string');
+
+class BpjsCrypto {
+
+  static generateSignature(consId, secretKey, timestamp) {
+    const message = `${consId}&${timestamp}`;
+    return crypto
+      .createHmac('sha256', secretKey)
+      .update(message)
+      .digest('base64');
+  }
+
+  static decryptResponse(encryptedBase64, userKey) {
+    try {
+
+      const keyBuffer = Buffer.alloc(32);
+      Buffer.from(userKey, 'utf8').copy(keyBuffer);
+
+      const decipher = crypto.createDecipheriv('aes-256-ecb', keyBuffer, null);
+      decipher.setAutoPadding(true);
+
+      const encryptedBuffer = Buffer.from(encryptedBase64, 'base64');
+      const decrypted = Buffer.concat([
+        decipher.update(encryptedBuffer),
+        decipher.final(),
+      ]);
+
+      return decrypted.toString('utf8');
+    } catch (err) {
+      const error = new Error(`BpjsCrypto: Dekripsi AES gagal. Pastikan BPJS_USER_KEY benar (${err.message})`);
+      error.statusCode = 502;
+      throw error;
+    }
+  }
+
+  static decompress(compressedStr) {
+    try {
+      const decompressed = LZString.decompress(compressedStr);
+      if (!decompressed) {
+        throw new Error('Hasil dekompresi null/kosong. String mungkin bukan LZ-compressed.');
+      }
+      return JSON.parse(decompressed);
+    } catch (err) {
+
+      try {
+        return JSON.parse(compressedStr);
+      } catch {
+        const error = new Error(`BpjsCrypto: Dekompresi LZ-String gagal (${err.message})`);
+        error.statusCode = 502;
+        throw error;
+      }
+    }
+  }
+
+  static decryptAndDecompress(encryptedBase64, userKey) {
+    const decrypted = this.decryptResponse(encryptedBase64, userKey);
+    return this.decompress(decrypted);
+  }
+}
+
+module.exports = BpjsCrypto;
 
 --- FILE: src\utils\cloudinary.js ---
 const cloudinary = require('cloudinary').v2;
@@ -5022,3 +8644,752 @@ cloudinary.config({
 });
 
 module.exports = cloudinary;
+
+--- FILE: src\utils\satusehat-client.js ---
+const axios = require('axios');
+const satusehatConfig = require('../config/satusehat');
+
+let cachedToken = null;
+let tokenExpiresAt = null;
+
+const generateAccessToken = async () => {
+
+  if (cachedToken && tokenExpiresAt && Date.now() < tokenExpiresAt - 5 * 60 * 1000) {
+    return cachedToken;
+  }
+
+  try {
+    const url = `${satusehatConfig.SATUSEHAT_URL.AUTH_URL}/accesstoken?grant_type=client_credentials`;
+
+    const params = new URLSearchParams();
+    params.append('client_id', satusehatConfig.SATUSEHAT_CLIENT_ID);
+    params.append('client_secret', satusehatConfig.SATUSEHAT_CLIENT_SECRET);
+
+    const response = await axios.post(url, params, {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      }
+    });
+
+    const data = response.data;
+
+    cachedToken = data.access_token;
+
+    const expiresInMs = data.expires_in * 1000;
+    tokenExpiresAt = Date.now() + expiresInMs;
+
+    console.log(`[SATUSEHAT Client] New Access Token generated. Expires in: ${data.expires_in} seconds`);
+
+    return cachedToken;
+  } catch (error) {
+    console.error('[SATUSEHAT Client] Failed to generate access token:', error.response?.data || error.message);
+    throw new Error('Gagal mendapatkan akses token dari SATUSEHAT');
+  }
+};
+
+const createFhirClient = async () => {
+  const token = await generateAccessToken();
+
+  return axios.create({
+    baseURL: satusehatConfig.SATUSEHAT_URL.FHIR_URL,
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    }
+  });
+};
+
+module.exports = {
+  generateAccessToken,
+  createFhirClient
+};
+
+--- FILE: src\utils\fhir-mappers\allergy.mapper.js ---
+
+const buildAllergyPayload = (orgIhs, pasien, dokter, kunjungan, alergiPasien) => {
+  if (!pasien?.noIHS) throw new Error("Pasien belum memiliki IHS Number");
+  if (!kunjungan?.encounterId) throw new Error("Kunjungan belum disinkronkan ke SATUSEHAT (Encounter ID kosong)");
+  if (!dokter?.tenagaMedis?.noIHS) throw new Error("Dokter belum memiliki IHS Number");
+
+  const today = new Date().toISOString();
+
+  const patientReference = `Patient/${pasien.noIHS}`;
+  const encounterReference = `Encounter/${kunjungan.encounterId}`;
+  const practitionerReference = `Practitioner/${dokter.tenagaMedis.noIHS}`;
+
+  return {
+    "resourceType": "AllergyIntolerance",
+    "identifier": [
+      {
+        "system": `http://sys-ids.kemkes.go.id/allergy/${orgIhs}`,
+        "use": "official",
+        "value": alergiPasien.id
+      }
+    ],
+    "clinicalStatus": {
+      "coding": [
+        {
+          "system": "http://terminology.hl7.org/CodeSystem/allergyintolerance-clinical",
+          "code": alergiPasien.statusKlinis || "active",
+          "display": (alergiPasien.statusKlinis === "active") ? "Active" : "Inactive"
+        }
+      ]
+    },
+    "verificationStatus": {
+      "coding": [
+        {
+          "system": "http://terminology.hl7.org/CodeSystem/allergyintolerance-verification",
+          "code": "unconfirmed",
+          "display": "Unconfirmed"
+        }
+      ]
+    },
+    "type": "allergy",
+    "category": [
+      alergiPasien.alergiMaster.kategori
+    ],
+    "criticality": alergiPasien.tingkatKeparahan || "low",
+    "code": {
+      "coding": [
+        {
+          "system": alergiPasien.alergiMaster.kategori === 'medication' ? "http://sys-ids.kemkes.go.id/kfa" : "http://snomed.info/sct",
+          "code": alergiPasien.alergiMaster.kode_snomed,
+          "display": alergiPasien.alergiMaster.nama_alergi
+        }
+      ],
+      "text": alergiPasien.alergiMaster.nama_alergi
+    },
+    "patient": {
+      "reference": patientReference,
+      "display": pasien.namaLengkap
+    },
+    "encounter": {
+      "reference": encounterReference
+    },
+    "recordedDate": alergiPasien.createdAt ? new Date(alergiPasien.createdAt).toISOString() : today,
+    "recorder": {
+      "reference": practitionerReference,
+      "display": dokter.nama
+    },
+    "reaction": [
+      {
+        "manifestation": [
+          {
+            "coding": [
+              {
+                "system": "http://snomed.info/sct",
+                "code": alergiPasien.manifestasiKode,
+                "display": alergiPasien.manifestasiNama
+              }
+            ],
+            "text": alergiPasien.manifestasiNama
+          }
+        ],
+        "severity": alergiPasien.tingkatKeparahan === 'high' ? 'severe' : 'mild'
+      }
+    ]
+  };
+};
+
+module.exports = {
+  buildAllergyPayload
+};
+
+--- FILE: src\utils\fhir-mappers\condition.mapper.js ---
+const buildConditionPayload = (data) => {
+
+  let verCode = "provisional";
+  let verDisplay = "Provisional";
+  const ver = data.statusDiagnosis ? data.statusDiagnosis.toLowerCase() : "";
+
+  if (ver === "definitif") {
+    verCode = "confirmed";
+    verDisplay = "Confirmed";
+  } else if (ver === "menyingkirkan" || ver === "rule out") {
+    verCode = "refuted";
+    verDisplay = "Refuted";
+  } else if (ver === "kerja") {
+    verCode = "differential";
+    verDisplay = "Differential";
+  }
+
+  let clinCode = "active";
+  let clinDisplay = "Active";
+  const clin = data.statusKlinis ? data.statusKlinis.toLowerCase() : "";
+
+  if (clin === "sembuh") {
+    clinCode = "resolved";
+    clinDisplay = "Resolved";
+  } else if (clin === "kambuh") {
+    clinCode = "relapse";
+    clinDisplay = "Relapse";
+  } else if (clin === "remisi") {
+    clinCode = "remission";
+    clinDisplay = "Remission";
+  }
+
+  return {
+    resourceType: "Condition",
+    clinicalStatus: {
+      coding: [
+        {
+          system: "http://terminology.hl7.org/CodeSystem/condition-clinical",
+          code: clinCode,
+          display: clinDisplay
+        }
+      ]
+    },
+    verificationStatus: {
+      coding: [
+        {
+          system: "http://terminology.hl7.org/CodeSystem/condition-ver-status",
+          code: verCode,
+          display: verDisplay
+        }
+      ]
+    },
+    category: [
+      {
+        coding: [
+          {
+            system: "http://terminology.hl7.org/CodeSystem/condition-category",
+            code: "encounter-diagnosis",
+            display: "Encounter Diagnosis"
+          }
+        ]
+      }
+    ],
+    code: {
+      coding: [
+        {
+          system: "http://hl7.org/fhir/sid/icd-10",
+          code: data.kodeIcd10,
+          display: data.namaDiagnosis
+        }
+      ]
+    },
+    subject: {
+      reference: `Patient/${data.pasienIhs}`,
+      display: data.pasienName
+    },
+    encounter: {
+      reference: `Encounter/${data.encounterId}`
+    },
+    recorder: {
+      reference: `Practitioner/${data.dokterIhs}`,
+      display: data.dokterName
+    }
+  };
+};
+
+module.exports = { buildConditionPayload };
+
+--- FILE: src\utils\fhir-mappers\encounter.mapper.js ---
+const buildEncounterPayload = (data, orgId) => {
+  const startEncounter = new Date().toISOString();
+
+  let classCode = "AMB";
+  let classDisplay = "ambulatory";
+
+  if (data.jenisPelayanan) {
+    const jp = data.jenisPelayanan.toLowerCase();
+    if (jp.includes('inap')) {
+      classCode = "IMP";
+      classDisplay = "inpatient encounter";
+    } else if (jp.includes('igd') || jp.includes('gawat')) {
+      classCode = "EMER";
+      classDisplay = "emergency";
+    }
+  }
+
+  return {
+    resourceType: "Encounter",
+    status: "arrived",
+    class: {
+      system: "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+      code: classCode,
+      display: classDisplay
+    },
+    subject: {
+      reference: `Patient/${data.pasienIhs}`,
+      display: data.pasienName
+    },
+    participant: [
+      {
+        type: [
+          {
+            coding: [
+              {
+                system: "http://terminology.hl7.org/CodeSystem/v3-ParticipationType",
+                code: data.peranDokter || "ATND",
+                display: data.peranDokter === 'CON' ? 'consultant' : (data.peranDokter === 'REF' ? 'referrer' : 'attender')
+              }
+            ]
+          }
+        ],
+        individual: {
+          reference: `Practitioner/${data.dokterIhs}`,
+          display: data.dokterName
+        }
+      }
+    ],
+    period: {
+      start: startEncounter
+    },
+    statusHistory: [
+      {
+        status: "arrived",
+        period: {
+          start: startEncounter
+        }
+      }
+    ],
+    location: [
+      {
+        location: {
+          reference: `Location/${data.poliIhs}`,
+          display: data.poliName
+        }
+      }
+    ],
+    serviceProvider: {
+      reference: `Organization/${orgId}`
+    },
+    identifier: [
+      {
+        system: `http://sys-ids.kemkes.go.id/encounter/${orgId}`,
+        value: data.noKunjungan
+      }
+    ]
+  };
+};
+
+module.exports = { buildEncounterPayload };
+
+--- FILE: src\utils\fhir-mappers\location.mapper.js ---
+const buildLocationPayload = (poliklinik, orgId) => {
+  return {
+    resourceType: "Location",
+    identifier: [
+      {
+        system: `http://sys-ids.kemkes.go.id/location/${orgId}`,
+        value: poliklinik.kodePoli
+      }
+    ],
+    status: "active",
+    name: poliklinik.namaPoli,
+    description: poliklinik.deskripsi || `Ruang Pelayanan ${poliklinik.namaPoli}`,
+    mode: "instance",
+    physicalType: {
+      coding: [
+        {
+          system: "http://terminology.hl7.org/CodeSystem/location-physical-type",
+          code: "ro",
+          display: "Room"
+        }
+      ]
+    },
+    managingOrganization: {
+      reference: `Organization/${orgId}`
+    }
+  };
+};
+
+module.exports = { buildLocationPayload };
+
+--- FILE: src\utils\fhir-mappers\medication-dispense.mapper.js ---
+const buildMedicationDispensePayload = (data, medicationId, orgId) => {
+  const now = new Date();
+  const utcNow = now.toISOString().split('.')[0] + '+00:00';
+
+  let orderableFormCode = 'TAB';
+  let orderableFormDisplay = 'Tablet';
+
+  if (data.sediaan && data.sediaan.toLowerCase().includes('kapsul')) {
+    orderableFormCode = 'CAP';
+  } else if (data.sediaan && data.sediaan.toLowerCase().includes('sirup')) {
+    orderableFormCode = 'TAB';
+  } else if (data.sediaan && data.sediaan.toLowerCase().includes('injeksi')) {
+    orderableFormCode = 'INJ';
+  }
+
+  return {
+    resourceType: 'MedicationDispense',
+    identifier: [
+      {
+        system: `http://sys-ids.kemkes.go.id/prescription/${orgId}`,
+        use: 'official',
+        value: data.resepId
+      },
+      {
+        system: `http://sys-ids.kemkes.go.id/prescription-item/${orgId}`,
+        use: 'official',
+        value: data.resepDetailId
+      }
+    ],
+    status: 'completed',
+    category: {
+      coding: [
+        {
+          system: 'http://terminology.hl7.org/fhir/CodeSystem/medicationdispense-category',
+          code: 'outpatient',
+          display: 'Outpatient'
+        }
+      ]
+    },
+    medicationReference: {
+      reference: `Medication/${medicationId}`,
+      display: data.namaObat
+    },
+    subject: {
+      reference: `Patient/${data.pasienIhs}`,
+      display: data.pasienName
+    },
+    context: {
+      reference: `Encounter/${data.encounterId}`
+    },
+    performer: [
+      {
+        function: {
+          coding: [
+            {
+              system: 'http://terminology.hl7.org/CodeSystem/medicationdispense-performer-function',
+              code: 'dataenterer',
+              display: 'Data Enterer'
+            }
+          ]
+        },
+        actor: {
+          reference: `Practitioner/${data.practitionerIhs}`,
+          display: data.practitionerName
+        }
+      }
+    ],
+    location: {
+      reference: `Location/${data.locationId}`,
+      display: data.locationName
+    },
+    authorizingPrescription: [
+      {
+        identifier: {
+          system: `http://sys-ids.kemkes.go.id/prescription-item/${orgId}`,
+          value: data.resepDetailId
+        }
+      }
+    ],
+    quantity: {
+      system: 'http://terminology.hl7.org/CodeSystem/v3-orderableDrugForm',
+      code: orderableFormCode,
+      value: data.jumlah
+    },
+    daysSupply: {
+      value: data.jumlahHari || 1,
+      unit: 'Day',
+      system: 'http://unitsofmeasure.org',
+      code: 'd'
+    },
+    whenPrepared: utcNow,
+    whenHandedOver: utcNow,
+    dosageInstruction: [
+      {
+        sequence: 1,
+        text: data.instruksi || 'Aturan pakai sesuai resep dokter',
+        timing: {
+          repeat: {
+            frequency: data.frekuensi || 3,
+            period: 1,
+            periodUnit: 'd'
+          }
+        },
+        route: {
+          coding: [
+            {
+              system: 'http://www.whocc.no/atc',
+              code: 'O',
+              display: 'Oral'
+            }
+          ]
+        },
+        doseAndRate: [
+          {
+            type: {
+              coding: [
+                {
+                  system: 'http://terminology.hl7.org/CodeSystem/dose-rate-type',
+                  code: 'ordered',
+                  display: 'Ordered'
+                }
+              ]
+            },
+            doseQuantity: {
+              value: data.dosis || 1,
+              unit: orderableFormCode,
+              system: 'http://terminology.hl7.org/CodeSystem/v3-orderableDrugForm',
+              code: orderableFormCode
+            }
+          }
+        ]
+      }
+    ]
+  };
+
+  return payload;
+};
+
+module.exports = { buildMedicationDispensePayload };
+
+--- FILE: src\utils\fhir-mappers\medication.mapper.js ---
+const buildMedicationPayload = (data, orgId, uniqueId = null) => {
+
+  let formCode = "BS023";
+  let formDisplay = "Kaplet Salut Selaput";
+
+  if (data.sediaan && data.sediaan.toLowerCase().includes('tablet')) {
+    formCode = "BS065";
+    formDisplay = "Tablet";
+  } else if (data.sediaan && data.sediaan.toLowerCase().includes('kapsul')) {
+    formCode = "BS036";
+    formDisplay = "Kapsul";
+  } else if (data.sediaan && data.sediaan.toLowerCase().includes('sirup')) {
+    formCode = "BS060";
+    formDisplay = "Sirup";
+  }
+
+  return {
+    resourceType: "Medication",
+    identifier: [
+      {
+        system: `http://sys-ids.kemkes.go.id/medication/${orgId}`,
+        use: "official",
+        value: uniqueId || data.resepDetailId || data.kodeObat
+      }
+    ],
+    code: {
+      coding: [
+        {
+          system: "http://sys-ids.kemkes.go.id/kfa",
+          code: data.kodeObat,
+          display: data.namaObat
+        }
+      ]
+    },
+    status: "active",
+    form: {
+      coding: [
+        {
+          system: "http://terminology.kemkes.go.id/CodeSystem/medication-form",
+          code: formCode,
+          display: formDisplay
+        }
+      ]
+    },
+    extension: [
+      {
+        url: "https://fhir.kemkes.go.id/r4/StructureDefinition/MedicationType",
+        valueCodeableConcept: {
+          coding: [
+            {
+              system: "http://terminology.kemkes.go.id/CodeSystem/medication-type",
+              code: "NC",
+              display: "Non-compound"
+            }
+          ]
+        }
+      }
+    ]
+  };
+};
+
+const buildMedicationRequestPayload = (data, medicationId, orgId) => {
+  return {
+    resourceType: "MedicationRequest",
+    identifier: [
+      {
+        system: `http://sys-ids.kemkes.go.id/prescription/${orgId}`,
+        use: "official",
+        value: data.resepId
+      },
+      {
+        system: `http://sys-ids.kemkes.go.id/prescription-item/${orgId}`,
+        use: "official",
+        value: data.resepDetailId
+      }
+    ],
+    status: "completed",
+    intent: "order",
+    category: [
+      {
+        coding: [
+          {
+            system: "http://terminology.hl7.org/CodeSystem/medicationrequest-category",
+            code: "outpatient",
+            display: "Outpatient"
+          }
+        ]
+      }
+    ],
+    priority: "routine",
+    medicationReference: {
+      reference: `Medication/${medicationId}`,
+      display: data.namaObat
+    },
+    subject: {
+      reference: `Patient/${data.pasienIhs}`,
+      display: data.pasienName
+    },
+    encounter: {
+      reference: `Encounter/${data.encounterId}`
+    },
+    authoredOn: new Date().toISOString(),
+    requester: {
+      reference: `Practitioner/${data.dokterIhs}`,
+      display: data.dokterName
+    },
+    dosageInstruction: [
+      {
+        sequence: 1,
+        text: data.aturanPakai
+      }
+    ],
+    dispenseRequest: {
+      dispenseInterval: {
+        value: 1,
+        unit: "days",
+        system: "http://unitsofmeasure.org",
+        code: "d"
+      },
+      validityPeriod: {
+        start: new Date().toISOString(),
+        end: new Date(new Date().getTime() + 30*24*60*60*1000).toISOString()
+      },
+      numberOfRepeatsAllowed: 0,
+      quantity: {
+        value: data.jumlah,
+        unit: "TAB",
+        system: "http://terminology.hl7.org/CodeSystem/v3-orderableDrugForm",
+        code: "TAB"
+      },
+      expectedSupplyDuration: {
+        value: 30,
+        unit: "days",
+        system: "http://unitsofmeasure.org",
+        code: "d"
+      }
+    }
+  };
+};
+
+module.exports = { buildMedicationPayload, buildMedicationRequestPayload };
+
+--- FILE: src\utils\fhir-mappers\observation.mapper.js ---
+const buildObservationPayload = (data) => {
+  const startEncounter = new Date().toISOString();
+
+  const payload = {
+    resourceType: "Observation",
+    status: "final",
+    category: [
+      {
+        coding: [
+          {
+            system: "http://terminology.hl7.org/CodeSystem/observation-category",
+            code: "vital-signs",
+            display: "Vital Signs"
+          }
+        ]
+      }
+    ],
+    code: {
+      coding: [
+        {
+          system: "http://loinc.org",
+          code: data.loincCode,
+          display: data.loincDisplay
+        }
+      ]
+    },
+    subject: {
+      reference: `Patient/${data.pasienIhs}`,
+      display: data.pasienName
+    },
+    encounter: {
+      reference: `Encounter/${data.encounterId}`
+    },
+    performer: [
+      {
+        reference: `Practitioner/${data.dokterIhs}`,
+        display: data.dokterName
+      }
+    ],
+    effectiveDateTime: startEncounter
+  };
+
+  if (data.loincCode === "85354-9") {
+    payload.component = data.components;
+  } else {
+    payload.valueQuantity = {
+      value: data.value,
+      unit: data.unit,
+      system: "http://unitsofmeasure.org",
+      code: data.unitCode
+    };
+  }
+
+  return payload;
+};
+
+module.exports = { buildObservationPayload };
+
+--- FILE: src\utils\fhir-mappers\procedure.mapper.js ---
+const buildProcedurePayload = (data, orgId) => {
+  return {
+    resourceType: "Procedure",
+    identifier: [
+      {
+        system: `http://sys-ids.kemkes.go.id/procedure/${orgId}`,
+        use: "official",
+        value: data.tindakanId
+      }
+    ],
+    status: "completed",
+    category: {
+      coding: [
+        {
+          system: "http://snomed.info/sct",
+          code: "103693007",
+          display: "Diagnostic procedure"
+        }
+      ]
+    },
+    code: {
+      coding: [
+        {
+          system: "http://hl7.org/fhir/sid/icd-9-cm",
+          code: data.kodeIcd9,
+          display: data.namaProsedur
+        }
+      ]
+    },
+    subject: {
+      reference: `Patient/${data.pasienIhs}`,
+      display: data.pasienName
+    },
+    encounter: {
+      reference: `Encounter/${data.encounterId}`
+    },
+    performedDateTime: data.waktuTindakan || new Date().toISOString(),
+    performer: [
+      {
+        actor: {
+          reference: `Practitioner/${data.dokterIhs}`,
+          display: data.dokterName
+        },
+        onBehalfOf: {
+          reference: `Organization/${orgId}`
+        }
+      }
+    ]
+  };
+};
+
+module.exports = { buildProcedurePayload };

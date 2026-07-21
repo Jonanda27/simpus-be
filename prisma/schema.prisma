@@ -197,8 +197,16 @@ model Kunjungan {
   noSep             String?
   encounterId       String?     // ID Encounter dari SATUSEHAT
   satusehatSync     Json?       // Tracking sinkronisasi SATUSEHAT
+
+  // ==========================================
+  // KOLOM BRIDGING BPJS PCARE (Anti-Corruption Layer)
+  // ==========================================
+  noKunjunganPcare  String?     // Nomor Kunjungan dari API PCare BPJS (setara SEP di RS)
+  noUrutPcare       String?     // Nomor urut antrian di PCare
+  statusKlaimBpjs   String?     // PENDING_SYNC | TERKIRIM | GAGAL | TIDAK_BERLAKU
   
   statusKunjungan   String      @default("MENUNGGU") // MENUNGGU, DIPERIKSA, SELESAI, BATAL dll
+
   
   // Relasi Ke Petugas (User)
   userPendaftarId   String?
@@ -468,6 +476,9 @@ model MasterLaboratorium {
   parameter    String
   satuan       String?
   nilaiRujukan String?
+  kodePanelLab String?
+  hargaTarif   Float    @default(0)
+  statusAktif  Boolean  @default(true)
   
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
@@ -508,6 +519,8 @@ model Poliklinik {
   deskripsi       String?
   statusAktif     Boolean     @default(true)
   ihsLocationId   String?     @unique
+  kdPoliPcare     String?
+  noAntrianPrefix String?
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
 
@@ -939,4 +952,91 @@ model AlergiPasien {
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
 }
+
+// ==========================================
+// REFERENSI ENUM (DYNAMIC DROPDOWNS FOR FE)
+// ==========================================
+
+model RefJenisPenjamin {
+  id          String   @id @default(cuid())
+  kode        String   @unique // "UMUM", "BPJS", "ASURANSI", "PERUSAHAAN"
+  label       String           // "Umum / Mandiri", "BPJS Kesehatan"
+  deskripsi   String?
+  isBpjs      Boolean  @default(false)
+  statusAktif Boolean  @default(true)
+  urutan      Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model RefJenisPelayanan {
+  id          String   @id @default(cuid())
+  kode        String   @unique // "RAWAT_JALAN", "RAWAT_INAP", "IGD", "UKM"
+  label       String           // "Rawat Jalan"
+  statusAktif Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model RefCaraDatang {
+  id               String   @id @default(cuid())
+  kode             String   @unique // "MANDIRI", "AMBULANS", "RUJUKAN"
+  label            String           // "Datang Sendiri"
+  butuhDataRujukan Boolean  @default(false)
+  statusAktif      Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+model RefPrioritas {
+  id          String   @id @default(cuid())
+  kode        String   @unique // "UMUM", "LANSIA", "DISABILITAS", "HAMIL", "ANAK"
+  label       String           // "Lansia (>60 Tahun)"
+  warnaBadge  String?          // "yellow", "red"
+  urutan      Int      @default(0)
+  statusAktif Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model RefKategoriTriage {
+  id          String   @id @default(cuid())
+  kode        String   @unique // "MERAH", "KUNING", "HIJAU", "HITAM"
+  label       String           // "Resusitasi / Merah"
+  warna       String           // "#EF4444"
+  deskripsi   String?
+  urutan      Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model RefMetodePembayaran {
+  id          String   @id @default(cuid())
+  kode        String   @unique // "TUNAI", "TRANSFER", "QRIS", "BPJS"
+  label       String
+  isBpjs      Boolean  @default(false)
+  statusAktif Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model RefSediaanObat {
+  id          String   @id @default(cuid())
+  kode        String   @unique // "TABLET", "KAPSUL", "SIRUP", "INJEKSI", "SALEP"
+  label       String
+  statusAktif Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model RefKategoriObat {
+  id          String   @id @default(cuid())
+  kode        String   @unique // "OBAT_BEBAS", "OBAT_KERAS", "NARKOTIKA", "PSIOTROPIKA"
+  label       String
+  warnaBadge  String?
+  statusAktif Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
 

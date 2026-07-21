@@ -16,6 +16,8 @@ const kasirRoute = require('./kasir.route');
 const ukmRoute = require('./ukm.route');
 const radiologiRoute = require('./radiologi.routes'); // [BARU] Import module radiologi
 const satusehatRoute = require('./satusehat.routes');
+const bpjsRoute = require('./bpjs.routes'); // [BARU] Import module BPJS PCare
+const referensiRoute = require('./referensi.routes'); // [BARU] Import module Referensi Enum
 const router = express.Router();
 const imunisasiRoute = require('./imunisasi.routes');
 
@@ -91,6 +93,14 @@ const defaultRoutes = [
   {
     path: '/satusehat',
     route: satusehatRoute,
+  },
+  {
+    path: '/bpjs',
+    route: bpjsRoute,
+  },
+  {
+    path: '/referensi',
+    route: referensiRoute,
   }
 ];
 
