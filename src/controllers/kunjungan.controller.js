@@ -69,9 +69,48 @@ const updateStatusKunjungan = async (req, res, next) => {
   }
 };
 
+const getDashboardStats = async (req, res, next) => {
+  try {
+    const data = await kunjunganService.getDashboardStats();
+    res.status(200).json({
+      success: true,
+      data: data,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const getPerawatDashboardStats = async (req, res, next) => {
+  try {
+    const data = await kunjunganService.getPerawatDashboardStats(req.user);
+    res.status(200).json({
+      success: true,
+      data: data,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const getDokterDashboardStats = async (req, res, next) => {
+  try {
+    const data = await kunjunganService.getDokterDashboardStats(req.user);
+    res.status(200).json({
+      success: true,
+      data: data,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getKunjunganScreening,
   panggilKunjungan,
   getKunjunganById,
   updateStatusKunjungan, // Wajib diexport
+  getDashboardStats,
+  getPerawatDashboardStats,
+  getDokterDashboardStats,
 };
