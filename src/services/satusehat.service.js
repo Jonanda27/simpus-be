@@ -74,14 +74,23 @@ const getPractitionerByNIK = async (nik) => {
   }
 };
 
-const { buildLocationPayload } = require('../utils/fhir-mappers/location.mapper');
-const { buildEncounterPayload } = require('../utils/fhir-mappers/encounter.mapper');
-const { buildObservationPayload } = require('../utils/fhir-mappers/observation.mapper');
-const { buildConditionPayload } = require('../utils/fhir-mappers/condition.mapper');
-const { buildMedicationPayload, buildMedicationRequestPayload } = require('../utils/fhir-mappers/medication.mapper');
-const { buildProcedurePayload } = require('../utils/fhir-mappers/procedure.mapper');
-const { buildAllergyPayload } = require('../utils/fhir-mappers/allergy.mapper');
-const { buildMedicationDispensePayload } = require('../utils/fhir-mappers/medication-dispense.mapper');
+const { 
+  buildLocationPayload, 
+  buildEncounterPayload, 
+  buildObservationPayload, 
+  buildConditionPayload, 
+  buildMedicationPayload, 
+  buildMedicationRequestPayload,
+  buildProcedurePayload,
+  buildAllergyPayload,
+  buildMedicationDispensePayload,
+  buildPatientPayload,
+  buildCompositionPayload,
+  buildClinicalImpressionPayload,
+  buildServiceRequestPayload,
+  buildSpecimenPayload
+} = require('../utils/fhir-mappers');
+
 
 /**
  * Create Location in SATUSEHAT for a Poliklinik

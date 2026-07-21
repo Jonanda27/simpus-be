@@ -4,13 +4,13 @@ const bcrypt = require('bcryptjs');
 const prisma = new PrismaClient();
 
 async function main() {
-  console.log('🚀 Memulai proses Seeding Data Puskesmas (Simulasi Real-World)...');
+  console.log('🚀 Memulai proses Seeding Data Puskesmas & HL7 FHIR SATUSEHAT (Simulasi Real-World)...');
 
   const passwordHash = await bcrypt.hash('password123', 10);
 
   // ==============================================================
   // 1. SEED USERS & ROLES
-  // ==========================================
+  // ==============================================================
   const users = [
     { username: 'admin', role: 'ADMIN', namaLengkap: 'Administrator Sistem' },
     { username: 'administrasi', role: 'ADMINISTRASI', namaLengkap: 'Petugas Loket Pendaftaran' },
@@ -35,7 +35,7 @@ async function main() {
   console.log('✅ Users berhasi di-seed.');
 
   // ==============================================================
-  // 1B. SEED REFERENSI ENUM (DYNAMIC DROPDOWNS FOR FE)
+  // 2. SEED REFERENSI ENUM (DYNAMIC DROPDOWNS FOR FE)
   // ==============================================================
   const refJenisPenjamins = [
     { kode: 'UMUM', label: 'Umum / Mandiri', isBpjs: false, urutan: 1 },
@@ -153,16 +153,15 @@ async function main() {
   }
   console.log('✅ Referensi Enum berhasil di-seed.');
 
-
   // ==============================================================
-  // 2. SEED POLIKLINIK, LAYANAN, & DOKTER POLI
-  // ==========================================
+  // 3. SEED POLIKLINIK, LAYANAN, & DOKTER POLI
+  // ==============================================================
   const masterPolis = [
     {
       kodePoli: 'RAD', namaPoli: 'Radiologi',
       layanans: [
         { kode: '01.24', nama: 'CT Scan Kepala', tarif: 800000 },
-        { kode: '87.44', nama: 'Foto Thoraks', tarif: 150000 },
+        { kode: '87.44', nama: 'Foto Thoraks PA', tarif: 150000 },
         { kode: '88.72', nama: 'USG Abdomen', tarif: 250000 },
       ]
     },
@@ -191,6 +190,8 @@ async function main() {
     }
   ];
 
+  const dokterMap = {};
+
   for (const poliData of masterPolis) {
     const poli = await prisma.poliklinik.upsert({
       where: { kodePoli: poliData.kodePoli },
@@ -218,9 +219,8 @@ async function main() {
       });
     }
 
-    // Buat akun dokter dan perawat untuk setiap poli
     const dokterUsername = `dr_${poliData.kodePoli.toLowerCase()}`;
-    await prisma.user.upsert({
+    const dokterUser = await prisma.user.upsert({
       where: { username: dokterUsername },
       update: {},
       create: {
@@ -231,67 +231,52 @@ async function main() {
         poliklinikId: poli.id
       }
     });
+    dokterMap[poliData.kodePoli] = dokterUser;
   }
   console.log('✅ Poliklinik & Layanan berhasil di-seed.');
 
   // ==============================================================
-  // 3. SEED DUMMY PASIEN REALISTIS (UNTUK TESTING SATUSEHAT)
-  // ==========================================
+  // 4. SEED DUMMY PASIEN REALISTIS (FHIR PATIENT)
+  // ==============================================================
   const dummyPatients = [
     {
       noRM: 'RM-000001', nik: '3201010101900001', noIHS: 'P10000000001',
       namaLengkap: 'Bapak Rahmat Susanto', tempatLahir: 'Jakarta', tanggalLahir: new Date('1980-05-15'),
       jenisKelamin: 'Laki-laki', agama: 'Islam', pekerjaan: 'Wiraswasta', statusPerkawinan: 'Menikah', kewarganegaraan: 'WNI'
-    }, // Pasien ideal untuk simulasi kasus TBC / Hipertensi
+    },
     {
       noRM: 'RM-000002', nik: '3201010101900002', noIHS: 'P10000000002',
       namaLengkap: 'Ibu Siti Aminah', tempatLahir: 'Bandung', tanggalLahir: new Date('1995-08-22'),
       jenisKelamin: 'Perempuan', agama: 'Islam', pekerjaan: 'Ibu Rumah Tangga', statusPerkawinan: 'Menikah', kewarganegaraan: 'WNI'
-    }, // Pasien ideal untuk simulasi kasus Ibu Hamil (ANC)
+    },
     {
       noRM: 'RM-000003', nik: '3201010101900003', noIHS: 'P10000000003',
       namaLengkap: 'Bayi Dilan', tempatLahir: 'Surabaya', tanggalLahir: new Date('2023-10-10'),
       jenisKelamin: 'Laki-laki', agama: 'Islam', pekerjaan: 'Belum Bekerja', statusPerkawinan: 'Belum Kawin', kewarganegaraan: 'WNI'
-    } // Pasien ideal untuk simulasi Imunisasi Bayi
+    }
   ];
 
+  const pasienMap = {};
   for (const pasien of dummyPatients) {
-    await prisma.pasien.upsert({
+    const p = await prisma.pasien.upsert({
       where: { nik: pasien.nik },
       update: {},
       create: { ...pasien }
     });
+    pasienMap[pasien.noRM] = p;
   }
   console.log('✅ Data Pasien Dummy berhasil di-seed.');
 
   // ==============================================================
-  // 4. SEED PROGRAM UKM
-  // ==========================================
-  const programs = [
-    { kode: 'HIV', nama: 'Program HIV/AIDS' },
-    { kode: 'TB', nama: 'Program TB Paru' },
-    { kode: 'STUNTING', nama: 'Program Pencegahan Stunting' },
-    { kode: 'KIA', nama: 'Program Kesehatan Ibu & Anak' }
-  ];
-
-  for (const prog of programs) {
-    await prisma.programUKM.upsert({
-      where: { kodeProgram: prog.kode },
-      update: {},
-      create: { kodeProgram: prog.kode, namaProgram: prog.nama, deskripsi: prog.nama }
-    });
-  }
-
+  // 5. SEED MASTER OBAT & ICD-10 & LAB
   // ==============================================================
-  // 5. SEED MASTER OBAT (Farmasi Harian & Program)
-  // ==========================================
   const masterObatData = [
     { kodeObat: 'OBT-ARV', namaObat: 'Obat ARV (Anti Retroviral)', kategori: 'Antiviral', sediaan: 'Tablet', stok: 1000, harga: 0 },
     { kodeObat: 'OBT-OAT', namaObat: 'OAT (Obat Anti Tuberkulosis) FDC', kategori: 'Antibiotik', sediaan: 'Tablet', stok: 500, harga: 0 },
     { kodeObat: 'OBT-001', namaObat: 'Paracetamol 500mg', kategori: 'Obat Bebas', sediaan: 'Tablet', stok: 2000, harga: 5000 },
-    { kodeObat: 'OBT-002', namaObat: 'Amoxicillin 500mg', kategori: 'Antibiotik Keras', sediaan: 'Kapsul', stok: 1500, harga: 15000 },
-    { kodeObat: 'OBT-003', namaObat: 'Amlodipine 5mg', kategori: 'Obat Keras (Hipertensi)', sediaan: 'Tablet', stok: 800, harga: 12000 },
-    { kodeObat: 'OBT-004', namaObat: 'Metformin 500mg', kategori: 'Obat Keras (Diabetes)', sediaan: 'Tablet', stok: 1200, harga: 10000 },
+    { kodeObat: 'OBT-002', namaObat: 'Amoxicillin 500mg', kategori: 'Obat Keras', sediaan: 'Kapsul', stok: 1500, harga: 15000 },
+    { kodeObat: 'OBT-003', namaObat: 'Amlodipine 5mg', kategori: 'Obat Keras', sediaan: 'Tablet', stok: 800, harga: 12000 },
+    { kodeObat: 'OBT-004', namaObat: 'Metformin 500mg', kategori: 'Obat Keras', sediaan: 'Tablet', stok: 1200, harga: 10000 },
   ];
 
   for (const obat of masterObatData) {
@@ -301,42 +286,29 @@ async function main() {
       create: { ...obat }
     });
   }
-  console.log('✅ Master Obat berhasil di-seed.');
 
-  // ==============================================================
-  // 6. SEED MASTER ICD-10 (Penyakit Harian & Program SATUSEHAT)
-  // ==========================================
   const icd10Data = [
-    // Penyakit Program (EpisodeOfCare)
-    { kode_icd10: 'A15.0', nama_diagnosis: 'Tuberkulosis paru, terkonfirmasi', kategori: 'Tuberkulosis', wajib_lapor: true, kode_program: 'TB' },
+    { kode_icd10: 'A15.0', nama_diagnosis: 'Tuberkulosis paru, terkonfirmasi mikroskopis', kategori: 'Tuberkulosis', wajib_lapor: true, kode_program: 'TB' },
     { kode_icd10: 'B20', nama_diagnosis: 'Penyakit infeksi HIV', kategori: 'HIV/AIDS', wajib_lapor: true, kode_program: 'HIV' },
     { kode_icd10: 'Z34', nama_diagnosis: 'Pengawasan kehamilan normal', kategori: 'Kehamilan', wajib_lapor: false, kode_program: 'KIA' },
-
-    // Penyakit Harian Poli Umum (Rawat Jalan)
     { kode_icd10: 'J06.9', nama_diagnosis: 'Infeksi Saluran Pernapasan Akut (ISPA)', kategori: 'Pernapasan', wajib_lapor: false, kode_program: null },
     { kode_icd10: 'I10', nama_diagnosis: 'Hipertensi Esensial (Primer)', kategori: 'Kardiovaskular', wajib_lapor: false, kode_program: null },
     { kode_icd10: 'E11.9', nama_diagnosis: 'Diabetes Melitus Tipe 2', kategori: 'Endokrin', wajib_lapor: false, kode_program: null },
-    { kode_icd10: 'A09', nama_diagnosis: 'Diare dan Gastroenteritis', kategori: 'Pencernaan', wajib_lapor: false, kode_program: null },
-    { kode_icd10: 'K30', nama_diagnosis: 'Dispepsia (Maag)', kategori: 'Pencernaan', wajib_lapor: false, kode_program: null },
   ];
 
   for (const data of icd10Data) {
     await prisma.masterICD10.upsert({
       where: { kode_icd10: data.kode_icd10 },
-      update: { nama_diagnosis: data.nama_diagnosis, kode_program: data.kode_program },
+      update: { nama_diagnosis: data.nama_diagnosis },
       create: { ...data, status_aktif: true }
     });
   }
-  console.log('✅ Master ICD-10 berhasil di-seed.');
 
-  // ==============================================================
-  // 7. SEED MASTER LABORATORIUM
-  // ==========================================
   const labData = [
-    { kategori: 'Hematologi', parameter: 'Hemoglobin (Hb)', satuan: 'g/dL', nilaiRujukan: '12.0 - 16.0' },
-    { kategori: 'Kimia Klinik', parameter: 'Gula Darah Sewaktu (GDS)', satuan: 'mg/dL', nilaiRujukan: '< 200' },
-    { kategori: 'Kimia Klinik', parameter: 'Kolesterol Total', satuan: 'mg/dL', nilaiRujukan: '< 200' },
-    { kategori: 'Kimia Klinik', parameter: 'Asam Urat', satuan: 'mg/dL', nilaiRujukan: '3.4 - 7.0' },
+    { kategori: 'Hematologi', parameter: 'Hemoglobin (Hb)', satuan: 'g/dL', nilaiRujukan: '12.0 - 16.0', hargaTarif: 25000, kodePanelLab: 'LOINC-5792-7' },
+    { kategori: 'Kimia Klinik', parameter: 'Gula Darah Sewaktu (GDS)', satuan: 'mg/dL', nilaiRujukan: '< 200', hargaTarif: 30000, kodePanelLab: 'LOINC-2345-7' },
+    { kategori: 'Kimia Klinik', parameter: 'Kolesterol Total', satuan: 'mg/dL', nilaiRujukan: '< 200', hargaTarif: 35000, kodePanelLab: 'LOINC-2093-3' },
+    { kategori: 'Mikrobiologi', parameter: 'BTA Sputum (Dahak)', satuan: 'Kualitatif', nilaiRujukan: 'Negatif', hargaTarif: 40000, kodePanelLab: 'LOINC-11545-1' },
   ];
 
   for (const lab of labData) {
@@ -346,53 +318,172 @@ async function main() {
     });
   }
 
+  console.log('✅ Master Obat, ICD-10, & Lab berhasil di-seed.');
+
   // ==============================================================
-  // 8. SEED MODALITAS RADIOLOGI & VAKSIN (KFA SATUSEHAT)
-  // ==========================================
-  const modalities = [
-    { kode: 'DX', nama: 'Digital Radiography (X-Ray)' },
-    { kode: 'CT', nama: 'Computed Tomography (CT Scan)' },
-    { kode: 'US', nama: 'Ultrasound (USG)' },
-  ];
+  // 6. SIMULASI ALUR KLINIS LENGKAP & HL7 FHIR RESOURCE DATA
+  // ==============================================================
+  console.log('⏳ Membuat Simulasi Transaksi Klinis HL7 FHIR (Encounter, SOAP, ServiceRequest, Specimen, DiagnosticReport, Composition)...');
 
-  for (const mod of modalities) {
-    await prisma.masterModality.upsert({
-      where: { kodeDicom: mod.kode },
-      update: {},
-      create: { kodeDicom: mod.kode, namaModality: mod.nama, statusAktif: true }
-    });
-  }
+  const pasienRahmat = pasienMap['RM-000001'];
+  const dokterUmum = dokterMap['UMUM'];
+  const poliUmum = await prisma.poliklinik.findUnique({ where: { kodePoli: 'UMUM' } });
 
-  const masterVaksins = [
-    { kodeKfa: '93001282', nama: 'Vaksin COVID-19 (Sinovac)', targetPenyakit: 'COVID-19' },
-    { kodeKfa: '93000601', nama: 'Vaksin BCG', targetPenyakit: 'TBC' },
-    { kodeKfa: '93000862', nama: 'Vaksin DPT-HB-Hib (Pentabio)', targetPenyakit: 'Difteri, Pertusis' },
-    { kodeKfa: '93000282', nama: 'Vaksin Polio Tetes (bOPV)', targetPenyakit: 'Polio' }
-  ];
+  // A. Kunjungan / Encounter FHIR
+  const kunjungan = await prisma.kunjungan.create({
+    data: {
+      pasienId: pasienRahmat.id,
+      satusehatId: 'Enc-FHIR-889001',
+      tanggalRegistrasi: new Date(),
+      jamRegistrasi: '08:30',
+      poliklinikId: poliUmum.id,
+      jenisPelayanan: 'Rawat Jalan',
+      statusPasien: 'Lama',
+      noAntrian: 'A-001',
+      prioritas: 'Umum',
+      caraDatang: 'Datang Sendiri',
+      dokterTujuanId: dokterUmum.id,
+      statusKunjungan: 'SELESAI',
+    },
+  });
 
-  for (const vak of masterVaksins) {
-    const vaksinRecord = await prisma.masterVaksin.upsert({
-      where: { kodeKfa: vak.kodeKfa },
-      update: {},
-      create: { kodeKfa: vak.kodeKfa, namaVaksin: vak.nama, targetPenyakit: vak.targetPenyakit, statusAktif: true }
-    });
+  // B. Screening Vital Signs (Observation)
+  await prisma.screening.create({
+    data: {
+      pasienId: pasienRahmat.id,
+      kunjunganId: kunjungan.id,
+      petugas: 'Perawat Siti',
+      jenisKedatangan: 'Rawat Jalan',
+      kategoriTriage: 'Hijau',
+      tinggiBadan: 170,
+      beratBadan: 68,
+      tekananDarahSistolik: 130,
+      tekananDarahDiastolik: 85,
+      nadi: 80,
+      frekuensiNapas: 18,
+      suhuTubuh: 37.2,
+      saturasiOksigen: 98,
+      keluhanUtama: 'Batuk berdahak lebih dari 2 minggu, demam sumeng malam hari.',
+      observationIds: ['Obs-Vital-Sistole-001', 'Obs-Vital-Diastole-001', 'Obs-Vital-Suhu-001'],
+    },
+  });
 
-    const dummyBatchNo = `BATCH-${vak.kodeKfa}-2024`;
-    await prisma.batchVaksin.upsert({
-      where: { vaksinId_noBatch: { vaksinId: vaksinRecord.id, noBatch: dummyBatchNo } },
-      update: { stok: 100 },
-      create: {
-        vaksinId: vaksinRecord.id,
-        noBatch: dummyBatchNo,
-        tanggalExpired: new Date('2027-12-31T23:59:59.000Z'),
-        stok: 100,
-        statusAktif: true
+  // C. Rekam Medis (SOAP Dokter)
+  const rekamMedis = await prisma.rekamMedis.create({
+    data: {
+      kunjunganId: kunjungan.id,
+      pasienId: pasienRahmat.id,
+      dokterId: dokterUmum.id,
+      keluhanUtama: 'Batuk berdahak 2 minggu, keringat malam.',
+      riwayatPenyakitSekarang: 'Pasien mengeluh batuk tak kunjung sembuh sejak 14 hari yang lalu.',
+      keadaanUmum: 'Tampak Sakit Ringan',
+      kesadaran: 'Compos Mentis',
+      pemeriksaanFisik: 'Thoraks: Rhonchi basah halus di apeks paru kanan (+).',
+      diagnosisKlinis: 'Suspek Tuberkulosis Paru (A15.0)',
+      rencanaTerapi: 'Pemeriksaan BTA Sputum 2x. Resep Obat Antipiretik & Ekspektoran.',
+      statusPemeriksaan: 'SELESAI',
+    },
+  });
+
+  // D. FHIR ClinicalImpression (Evaluasi & Prognosis SOAP)
+  await prisma.clinicalImpression.create({
+    data: {
+      satusehatId: 'Imp-FHIR-990123',
+      rekamMedisId: rekamMedis.id,
+      pasienId: pasienRahmat.id,
+      kunjunganId: kunjungan.id,
+      dokterId: dokterUmum.id,
+      status: 'completed',
+      statusReason: 'A15.0',
+      summary: 'Pasien menunjukkan gejala khas TB Paru dengan ronki apeks. Memerlukan pemeriksaan spesimen dahak.',
+      description: 'Asesmen awal TB Paru Rawat Jalan.',
+      prognosisKode: 'PR000001',
+      prognosisDisplay: 'Prognosis Baik (Bonam) bila patuh pengobatan OAT',
+      investigationJson: ['Obs-Vital-001', 'Cond-TB-001'],
+      satusehatSync: { status: 'SYNCED', timestamp: new Date() },
+    },
+  });
+
+  // E. FHIR ServiceRequest (Order Laboratorium BTA Sputum)
+  const orderLab = await prisma.orderLaboratorium.create({
+    data: {
+      satusehatId: 'ServReq-Lab-771001',
+      intent: 'original-order',
+      priority: 'routine',
+      categoryCode: '108252007', // SNOMED CT: Laboratory procedure
+      requestCode: 'LOINC-11545-1', // BTA Sputum
+      kunjunganId: kunjungan.id,
+      pasienId: pasienRahmat.id,
+      dokterId: dokterUmum.id,
+      status: 'SELESAI',
+      catatanKlinis: 'Pemeriksaan Mikroskopis BTA Dahak Sewaktu-Pagi',
+      details: {
+        create: [
+          { parameter: 'BTA Sputum (Dahak)', hasil: 'Positif (+1)', satuan: 'Kualitatif', nilaiRujukan: 'Negatif' }
+        ]
       }
-    });
-  }
-  console.log('✅ Modul Radiologi & Imunisasi berhasil di-seed.');
+    },
+  });
 
-  console.log('🎉 SEEDING SELESAI! Database siap digunakan untuk simulasi nyata.');
+  // F. FHIR Specimen (SampelLaboratorium Dahak/Sputum)
+  await prisma.sampelLaboratorium.create({
+    data: {
+      satusehatId: 'Specimen-Sputum-554001',
+      orderLabId: orderLab.id,
+      pasienId: pasienRahmat.id,
+      kunjunganId: kunjungan.id,
+      collectorId: dokterUmum.id,
+      jenisSpesimenKode: '119297000', // SNOMED CT: Sputum specimen
+      jenisSpesimenNama: 'Dahak/Sputum Pagi',
+      waktuPengambilan: new Date(),
+      volume: 3.5,
+      satuanVolume: 'mL',
+      kondisiSpesimen: 'available',
+      catatan: 'Spesimen kental mukopurulen',
+      satusehatSync: { status: 'SYNCED', timestamp: new Date() },
+    },
+  });
+
+  // G. FHIR DiagnosticReport (Laporan Hasil Lab BTA)
+  await prisma.laporanDiagnostik.create({
+    data: {
+      satusehatId: 'DiagRep-Lab-332001',
+      kunjunganId: kunjungan.id,
+      pasienId: pasienRahmat.id,
+      dokterId: dokterUmum.id,
+      kategori: 'LABORATORIUM',
+      kodePemeriksaan: 'LOINC-11545-1',
+      namaPemeriksaan: 'BTA Sputum Mikroskopis',
+      status: 'final',
+      kesimpulan: 'Ditemukan Basil Tahan Asam (BTA) Positif (+1). Pasien terkonfirmasi TB Paru.',
+      orderLabId: orderLab.id,
+      observationIds: ['Obs-BTA-Result-001'],
+      satusehatSync: { status: 'SYNCED', timestamp: new Date() },
+    },
+  });
+
+  // H. FHIR Composition (Resume Medis Rawat Jalan)
+  await prisma.resumeMedis.create({
+    data: {
+      satusehatId: 'Comp-Resume-110001',
+      kunjunganId: kunjungan.id,
+      pasienId: pasienRahmat.id,
+      dokterId: dokterUmum.id,
+      typeCode: '11488-4', // LOINC: Consultation note / Discharge summary
+      status: 'final',
+      title: 'Resume Medis Rawat Jalan - TB Paru',
+      ringkasanKlinis: 'Pasien Rahmat Susanto didiagnosis TB Paru BTA (+1). Telah diberikan edukasi etika batuk dan peresepan OAT FDC.',
+      instruksiTindakLanjut: 'Kontrol ulang 2 minggu lagi untuk evaluasi efisiensi pengobatan OAT. Patuhi minum obat setiap hari.',
+      conditionIds: ['Cond-A15.0-UUID'],
+      observationIds: ['Obs-Vital-UUID', 'Obs-BTA-UUID'],
+      procedureIds: ['Proc-Edukasi-UUID'],
+      medicationRequestIds: ['MedReq-OAT-UUID'],
+      satusehatSync: { status: 'SYNCED', timestamp: new Date() },
+    },
+  });
+
+  console.log('✅ Simulasi Alur Transaksi Klinis & HL7 FHIR SATUSEHAT berhasil di-seed!');
+  console.log('🎉 SEEDING SANGAT LENGKAP & DETIL SELESAI!');
 }
 
 main()

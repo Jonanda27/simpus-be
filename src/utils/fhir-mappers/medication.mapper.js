@@ -60,6 +60,10 @@ const buildMedicationPayload = (data, orgId, uniqueId = null) => {
 };
 
 const buildMedicationRequestPayload = (data, medicationId, orgId) => {
+  const authoredDate = data.tanggalResep 
+    ? new Date(data.tanggalResep).toISOString() 
+    : new Date().toISOString();
+
   return {
     resourceType: "MedicationRequest",
     identifier: [
@@ -74,7 +78,7 @@ const buildMedicationRequestPayload = (data, medicationId, orgId) => {
         value: data.resepDetailId // ID Resep per-item
       }
     ],
-    status: "completed", 
+    status: data.status === 'SELESAI' ? 'completed' : 'active', 
     intent: "order",
     category: [
       {
@@ -99,15 +103,53 @@ const buildMedicationRequestPayload = (data, medicationId, orgId) => {
     encounter: {
       reference: `Encounter/${data.encounterId}`
     },
-    authoredOn: new Date().toISOString(),
+    authoredOn: authoredDate,
     requester: {
       reference: `Practitioner/${data.dokterIhs}`,
       display: data.dokterName
     },
+    ...(data.catatan && {
+      note: [{ text: data.catatan }]
+    }),
     dosageInstruction: [
       {
         sequence: 1,
-        text: data.aturanPakai // Aturan pakai naratif, misal "3 x 1 Tablet sesudah makan"
+        text: data.aturanPakai,
+        timing: {
+          repeat: {
+            frequency: data.frekuensi || 3,
+            period: 1,
+            periodUnit: "d"
+          }
+        },
+        route: {
+          coding: [
+            {
+              system: "http://www.whocc.no/atc",
+              code: data.rutePemberian || "O",
+              display: "Oral"
+            }
+          ]
+        },
+        doseAndRate: [
+          {
+            type: {
+              coding: [
+                {
+                  system: "http://terminology.hl7.org/CodeSystem/dose-rate-type",
+                  code: "ordered",
+                  display: "Ordered"
+                }
+              ]
+            },
+            doseQuantity: {
+              value: data.dosisAngka || 1,
+              unit: data.dosisSatuan || "TAB",
+              system: "http://terminology.hl7.org/CodeSystem/v3-orderableDrugForm",
+              code: data.dosisSatuan || "TAB"
+            }
+          }
+        ]
       }
     ],
     dispenseRequest: {
@@ -118,18 +160,18 @@ const buildMedicationRequestPayload = (data, medicationId, orgId) => {
         code: "d"
       },
       validityPeriod: {
-        start: new Date().toISOString(),
-        end: new Date(new Date().getTime() + 30*24*60*60*1000).toISOString() // Valid 30 hari
+        start: authoredDate,
+        end: new Date(new Date(authoredDate).getTime() + 30*24*60*60*1000).toISOString()
       },
       numberOfRepeatsAllowed: 0,
       quantity: {
-        value: data.jumlah, // Jumlah obat yang diberikan
-        unit: "TAB", // Default, sebaiknya dinamis dari sediaan
+        value: data.jumlah,
+        unit: data.sediaan || "TAB",
         system: "http://terminology.hl7.org/CodeSystem/v3-orderableDrugForm",
         code: "TAB"
       },
       expectedSupplyDuration: {
-        value: 30, // Estimasi durasi 30 hari
+        value: 30,
         unit: "days",
         system: "http://unitsofmeasure.org",
         code: "d"
@@ -139,3 +181,4 @@ const buildMedicationRequestPayload = (data, medicationId, orgId) => {
 };
 
 module.exports = { buildMedicationPayload, buildMedicationRequestPayload };
+
