@@ -91,8 +91,29 @@ const getKunjunganById = async (id) => {
   return kunjungan;
 };
 
+// Tambahkan fungsi ini di src/services/kunjungan.service.js
+const updateStatusKunjungan = async (kunjunganId, statusBaru) => {
+  const kunjungan = await prisma.kunjungan.findUnique({
+    where: { id: kunjunganId }
+  });
+
+  if (!kunjungan) {
+    const err = new Error('Data Kunjungan tidak ditemukan');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  // Update status menggunakan Prisma
+  return await prisma.kunjungan.update({
+    where: { id: kunjunganId },
+    data: { statusKunjungan: statusBaru }
+  });
+};
+
+
 module.exports = {
   getKunjunganScreening,
   panggilKunjungan,
   getKunjunganById,
+  updateStatusKunjungan
 };

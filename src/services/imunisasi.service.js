@@ -1,0 +1,117 @@
+const prisma = require('../config/prisma');
+
+const imunisasiService = {
+    /**
+     * Mengambil daftar master vaksin yang aktif (Untuk Dropdown)
+     */
+    getAllMasterVaksin: async () => {
+        return await prisma.masterVaksin.findMany({
+            where: { statusAktif: true },
+            orderBy: { namaVaksin: 'asc' },
+        });
+    },
+
+    /**
+     * Mengambil daftar batch (stok) berdasarkan ID Vaksin (Untuk Dropdown dinamis)
+     */
+    getBatchByVaksin: async (vaksinId) => {
+        return await prisma.batchVaksin.findMany({
+            where: {
+                vaksinId: vaksinId,
+                statusAktif: true,
+                stok: { gt: 0 }, // Hanya tampilkan yang stoknya masih ada
+                tanggalExpired: { gt: new Date() } // Jangan tampilkan yang sudah kedaluwarsa
+            },
+            orderBy: { tanggalExpired: 'asc' },
+        });
+    },
+
+    /**
+     * LOGIKA INTI: Mencatat Riwayat Imunisasi & Memotong Stok Batch
+     */
+    catatRiwayat: async (data, petugasId) => {
+        const {
+            pasienId, kunjunganId, batchVaksinId, isRiwayatLuar,
+            dosisKe, dosisJumlah, lokasiSuntik, ruteSuntik, catatan, tanggalSuntik
+        } = data;
+
+        // VALIDASI ARSITEKTUR: Jika bukan riwayat dari luar, Kunjungan (Encounter) wajib ada!
+        if (!isRiwayatLuar && !kunjunganId) {
+            const error = new Error('Penyuntikan di Puskesmas WAJIB menyertakan ID Kunjungan.');
+            error.statusCode = 400;
+            throw error;
+        }
+
+        return await prisma.$transaction(async (tx) => {
+            // 1. Cek ketersediaan Batch Vaksin
+            const batch = await tx.batchVaksin.findUnique({
+                where: { id: batchVaksinId },
+            });
+
+            if (!batch) throw new Error('Data Batch Vaksin tidak ditemukan.');
+            if (!isRiwayatLuar && batch.stok < 1) throw new Error('Stok vaksin untuk batch ini sudah habis.');
+
+            // 2. Buat Riwayat Imunisasi
+            const riwayat = await tx.riwayatImunisasi.create({
+                data: {
+                    pasienId,
+                    kunjunganId: isRiwayatLuar ? null : kunjunganId,
+                    batchVaksinId,
+                    isRiwayatLuar: isRiwayatLuar || false,
+                    tanggalSuntik: tanggalSuntik ? new Date(tanggalSuntik) : new Date(),
+                    dosisKe: parseInt(dosisKe),
+                    dosisJumlah: dosisJumlah ? parseFloat(dosisJumlah) : null,
+                    lokasiSuntik,
+                    ruteSuntik,
+                    petugasId: isRiwayatLuar ? null : petugasId, // Petugas hanya relevan jika disuntik di RS kita
+                    catatan,
+                },
+            });
+
+            // 3. Kurangi stok vaksin HANYA JIKA disuntik di Puskesmas kita
+            if (!isRiwayatLuar) {
+                await tx.batchVaksin.update({
+                    where: { id: batchVaksinId },
+                    data: { stok: batch.stok - 1 },
+                });
+            }
+
+            return riwayat;
+        });
+    },
+
+    /**
+     * Mengambil riwayat lengkap pasien (Untuk Buku KIA Digital)
+     */
+    getRiwayatByPasien: async (pasienId) => {
+        return await prisma.riwayatImunisasi.findMany({
+            where: { pasienId },
+            include: {
+                batchVaksin: {
+                    include: { vaksin: true }
+                },
+                petugas: { select: { namaLengkap: true } }
+            },
+            orderBy: { tanggalSuntik: 'desc' },
+        });
+    },
+
+    /**
+     * Mengambil detail komprehensif untuk dikirim ke SATUSEHAT
+     */
+    getRiwayatLengkapById: async (id) => {
+        return await prisma.riwayatImunisasi.findUnique({
+            where: { id },
+            include: {
+                pasien: { include: { persetujuan: true } }, // Ambil data consent
+                kunjungan: true,
+                batchVaksin: {
+                    include: { vaksin: true }
+                },
+                petugas: true, // Butuh NIK/ID Praktisi untuk SATUSEHAT
+            }
+        });
+    }
+};
+
+module.exports = imunisasiService;

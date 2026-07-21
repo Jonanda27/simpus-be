@@ -28,8 +28,45 @@ const addLogPemantauan = async (req, res, next) => {
   }
 };
 
+// =========================================================================
+// [BARU] FUNGSI ORKESTRASI INTEGRASI SATUSEHAT
+// =========================================================================
+const syncKeSatuSehat = async (req, res, next) => {
+  try {
+    const { registerId } = req.params;
+
+    // Panggil mesin integrasi (Service) yang sudah kita buat
+    const result = await ukmService.syncEpisodeOfCare(registerId);
+
+    // Kembalikan respons sukses beserta "Tanda Terima" dari Kemenkes
+    res.status(200).json({
+      success: true,
+      message: result.pesan,
+      data: {
+        satusehatConditionId: result.satusehatConditionId,
+        satusehatEpisodeId: result.satusehatEpisodeId
+      }
+    });
+
+  } catch (error) {
+    // Tangkap error validasi spesifik dari FHIR SATUSEHAT (jika ada)
+    // Ini sangat penting agar developer Frontend tahu bagian data mana yang ditolak Kemenkes
+    if (error.details) {
+      return res.status(error.statusCode || 400).json({
+        success: false,
+        message: error.message,
+        satusehat_error: error.details
+      });
+    }
+
+    // Jika error lokal (misal database mati), lempar ke middleware error handler global
+    next(error);
+  }
+};
+
 module.exports = {
   getDashboardStats,
   getPasienByProgram,
-  addLogPemantauan
+  addLogPemantauan,
+  syncKeSatuSehat // Jangan lupa diekspor!
 };

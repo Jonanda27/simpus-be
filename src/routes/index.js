@@ -14,7 +14,9 @@ const farmasiRoute = require('./farmasi.routes');
 const laboratoriumRoute = require('./laboratorium.routes');
 const kasirRoute = require('./kasir.route');
 const ukmRoute = require('./ukm.route');
+const radiologiRoute = require('./radiologi.routes'); // [BARU] Import module radiologi
 const router = express.Router();
+const imunisasiRoute = require('./imunisasi.routes');
 
 const defaultRoutes = [
   {
@@ -76,6 +78,14 @@ const defaultRoutes = [
   {
     path: '/ukm',
     route: ukmRoute,
+  },
+  {
+    path: '/radiologi', 
+    route: radiologiRoute,
+  },
+  {
+    path: '/imunisasi',
+    route: imunisasiRoute,
   }
 ];
 

@@ -32,9 +32,15 @@ model User {
   rujukanKeluar    RujukanKeluar[]  @relation("DokterRujukan")
   orderLabs        OrderLaboratorium[] @relation("DokterOrderLab")
   
+  // Relasi Radiologi Baru
+  orderRadiologi   OrderRadiologi[]       @relation("DokterOrderRadiologi")
+  bacaRadiologi    PemeriksaanRadiologi[] @relation("DokterBacaRadiologi")
+  
   penginputRekamMedis RekamMedis[] @relation("PenginputRekamMedis")
   penginputDiagnosis DiagnosisPasien[] @relation("PenginputDiagnosis")
   penginputResep      Resep[]        @relation("PenginputResep")
+  // Relasi Imunisasi (Baru)
+  imunisasiDilakukan  RiwayatImunisasi[] @relation("PetugasImunisasi")
 }
 
 // 1. Data Induk Pasien
@@ -75,7 +81,9 @@ model Pasien {
   resep           Resep[]
   rujukanKeluar   RujukanKeluar[]
   orderLabs       OrderLaboratorium[]
+  orderRadiologi  OrderRadiologi[]
   tagihans        Tagihan[]
+  riwayatImunisasi  RiwayatImunisasi[]
   registerUkm     RegisterUKM[]
 
   createdAt       DateTime    @default(now())
@@ -167,6 +175,8 @@ model Kunjungan {
   pasienId        String
   pasien          Pasien      @relation(fields: [pasienId], references: [id], onDelete: Cascade)
   
+  satusehatId     String?     @unique // ID Encounter dari SATUSEHAT (PONDASI UTAMA)
+
   tanggalRegistrasi DateTime
   jamRegistrasi     String
   timestamp         String?
@@ -182,7 +192,7 @@ model Kunjungan {
   caraDatang        String      // Datang sendiri, Ambulans, Rujukan
   
   noSep             String?
-  statusKunjungan   String      @default("MENUNGGU") // MENUNGGU, DIPERIKSA, SELESAI, BATAL
+  statusKunjungan   String      @default("MENUNGGU") // MENUNGGU, DIPERIKSA, SELESAI, BATAL dll
   
   // Relasi Ke Petugas (User)
   userPendaftarId   String?
@@ -202,7 +212,10 @@ model Kunjungan {
   resep             Resep[]
   rujukanKeluar     RujukanKeluar?
   orderLab          OrderLaboratorium?
+  orderRadiologi    OrderRadiologi?
+  pemeriksaanRadiologi PemeriksaanRadiologi[] // Relasi langsung untuk mempermudah query ImagingStudy
   tagihan           Tagihan?
+  riwayatImunisasi  RiwayatImunisasi[] // 1 Kunjungan bisa banyak suntikan vaksin
 
   createdAt         DateTime    @default(now())
   updatedAt         DateTime    @updatedAt
@@ -230,7 +243,7 @@ model PersetujuanMedis {
 
   persetujuanPengobatan Boolean @default(false)
   persetujuanRekamMedis Boolean @default(false)
-  persetujuanSatusehat  Boolean @default(false)
+  persetujuanSatusehat  Boolean @default(false) // SAKLAR UTAMA INTEGRASI
   persetujuanReminder   Boolean @default(false)
   
   tandaTangan           String  @db.Text
@@ -336,6 +349,8 @@ model RekamMedis {
 // 11. Data Diagnosis Pasien (Transaksi ICD-10)
 model DiagnosisPasien {
   id              String      @id @default(cuid())
+  satusehatId     String?     @unique // ID Condition dari SATUSEHAT
+  
   pasienId        String
   pasien          Pasien      @relation(fields: [pasienId], references: [id], onDelete: Cascade)
   
@@ -362,7 +377,7 @@ model DiagnosisPasien {
   tanggalSembuh   DateTime?
   statusAkhir     String?     // Aktif, Sembuh, Meninggal, Dirujuk
   
-  sinkronSatusehat Boolean    @default(false)
+  sinkronSatusehat Boolean    @default(false) // Deprecated: Diganti dengan pengecekan satusehatId
   
   penginputId             String?   // ID Asisten/Perawat yang menginput data
   penginput               User?     @relation("PenginputDiagnosis", fields: [penginputId], references: [id])
@@ -374,6 +389,8 @@ model DiagnosisPasien {
 // 12. Data Tindakan/Prosedur Pasien (ICD-9-CM)
 model TindakanPasien {
   id              String      @id @default(cuid())
+  satusehatId     String?     @unique // ID Procedure dari SATUSEHAT
+
   pasienId        String
   pasien          Pasien      @relation(fields: [pasienId], references: [id], onDelete: Cascade)
   
@@ -607,6 +624,78 @@ model OrderLaboratoriumDetail {
 }
 
 // ==========================================
+// MODUL RADIOLOGI & IMAGING STUDY (SATUSEHAT)
+// ==========================================
+
+model MasterModality {
+  id              String      @id @default(cuid())
+  kodeDicom       String      @unique // Contoh: DX, CT, MR, US
+  namaModality    String      // Contoh: Digital Radiography, Computed Tomography
+  deskripsi       String?
+  statusAktif     Boolean     @default(true)
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  pemeriksaan     PemeriksaanRadiologi[]
+}
+
+// Wadah untuk Order/Permintaan dari Dokter (Induk dari pemeriksaan)
+model OrderRadiologi {
+  id              String      @id @default(cuid())
+  
+  kunjunganId     String      @unique
+  kunjungan       Kunjungan   @relation(fields: [kunjunganId], references: [id], onDelete: Cascade)
+  
+  pasienId        String
+  pasien          Pasien      @relation(fields: [pasienId], references: [id], onDelete: Cascade)
+  
+  dokterId        String
+  dokter          User        @relation("DokterOrderRadiologi", fields: [dokterId], references: [id])
+  
+  status          String      @default("MENUNGGU_RADIOLOGI") // MENUNGGU_RADIOLOGI, DIPROSES, SELESAI, DIBATALKAN
+  catatanKlinis   String?     @db.Text
+  tanggalOrder    DateTime    @default(now())
+  
+  pemeriksaan     PemeriksaanRadiologi[]
+}
+
+// Wadah Utama ImagingStudy (One-to-Many terhadap Order & Kunjungan)
+// Termasuk Ekspertise/Hasil bacaan dokter (Disatukan untuk High Cohesion)
+model PemeriksaanRadiologi {
+  id                String      @id @default(cuid())
+  
+  orderId           String
+  order             OrderRadiologi @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  // Keterkaitan langsung ke Kunjungan untuk mempermudah Query Gateway SATUSEHAT
+  kunjunganId       String
+  kunjungan         Kunjungan   @relation(fields: [kunjunganId], references: [id], onDelete: Cascade)
+  
+  modalityId        String
+  modality          MasterModality @relation(fields: [modalityId], references: [id])
+  
+  // Pondasi SATUSEHAT
+  satusehatId       String?     @unique // ID resource ImagingStudy di SATUSEHAT
+  studyInstanceUid  String?     @unique // UID unik dari mesin modalitas radiologi
+  
+  bodySite          String      // Bagian tubuh yang diperiksa (Standar SNOMED CT)
+  waktuPemeriksaan  DateTime    @default(now())
+
+  // Ekspertise Radiologi / DiagnosticReport
+  interpretasi      String?     @db.Text
+  kesan             String?     @db.Text
+  
+  // Dokter spesialis yang membaca hasil rontgen
+  dokterPembacaId   String?
+  dokterPembaca     User?       @relation("DokterBacaRadiologi", fields: [dokterPembacaId], references: [id])
+  
+  fileDicomUrl      String?     // URL penyimpanan file jika menggunakan PACS/Cloud
+  
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+}
+
+// ==========================================
 // MODUL KASIR (TAGIHAN & PEMBAYARAN)
 // ==========================================
 
@@ -633,7 +722,7 @@ model DetailTagihan {
   tagihan         Tagihan     @relation(fields: [tagihanId], references: [id], onDelete: Cascade)
   
   namaItem        String
-  kategori        String      // Pendaftaran, Tindakan, Obat, Laboratorium
+  kategori        String      // Pendaftaran, Tindakan, Obat, Laboratorium, Radiologi
   jumlah          Int         @default(1)
   hargaSatuan     Float
   subTotal        Float
@@ -654,6 +743,82 @@ model Pembayaran {
 }
 
 // ==========================================
+// MODUL IMUNISASI (SATUSEHAT IMMUNIZATION)
+// ==========================================
+
+// 1. Tabel Pondasi: Master Vaksin berdasarkan KFA (Kamus Farmasi)
+model MasterVaksin {
+  id              String      @id @default(cuid())
+  kodeKfa         String      @unique // Kode standar dari SATUSEHAT
+  namaVaksin      String      // Contoh: Vaksin BCG, Vaksin DPT
+  targetPenyakit  String?     // Contoh: TBC, Difteri, Polio
+  statusAktif     Boolean     @default(true)
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  batchVaksin     BatchVaksin[]
+}
+
+// 2. Tabel Logistik Sementara: Batch Vaksin yang tersedia di kulkas Puskesmas
+model BatchVaksin {
+  id              String      @id @default(cuid())
+  
+  vaksinId        String
+  vaksin          MasterVaksin @relation(fields: [vaksinId], references: [id], onDelete: Restrict)
+  
+  noBatch         String      // Nomor Lot/Batch produksi dari pabrik
+  tanggalExpired  DateTime    // Tanggal kedaluwarsa vaksin
+  stok            Int         @default(0) // Jumlah vial/dosis
+  statusAktif     Boolean     @default(true)
+  
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  
+  riwayatSuntik   RiwayatImunisasi[]
+
+  // Proteksi Arsitektur: 1 Vaksin tidak boleh punya 2 Nomor Batch yang sama persis
+  @@unique([vaksinId, noBatch]) 
+}
+
+// 3. Tabel Transaksi Inti: Riwayat Penyuntikan
+model RiwayatImunisasi {
+  id                String      @id @default(cuid())
+  
+  // Pondasi SATUSEHAT & Penanda Sumber Data
+  satusehatId       String?     @unique // ID Immunization dari Kemenkes (Tanda Terima)
+  isRiwayatLuar     Boolean     @default(false) // TRUE jika ini catatan dari RS/Bidan lain
+  
+  // Relasi Domain
+  pasienId          String
+  pasien            Pasien      @relation(fields: [pasienId], references: [id], onDelete: Cascade)
+  
+  // Kunjungan Boleh Kosong (Nullable) jika isRiwayatLuar = true
+  kunjunganId       String?     
+  kunjungan         Kunjungan?  @relation(fields: [kunjunganId], references: [id], onDelete: Cascade)
+  
+  // Vaksin spesifik mana dan Batch nomor berapa yang dipakai?
+  batchVaksinId     String
+  batchVaksin       BatchVaksin @relation(fields: [batchVaksinId], references: [id], onDelete: Restrict)
+  
+  // Atribut Detail Klinis (Sesuai Syarat SATUSEHAT)
+  tanggalSuntik     DateTime    @default(now())
+  dosisKe           Int         // Dosis 1, Dosis 2, dst.
+  dosisJumlah       Float?      // Jumlah takaran, misal: 0.5 (mL)
+  
+  lokasiSuntik      String?     // Kode SNOMED CT (Misal: Lengan Kiri, Paha Kanan)
+  ruteSuntik        String?     // Kode SNOMED CT (Misal: Intramuscular, Oral)
+  
+  // Petugas pelaksana
+  petugasId         String?     // Boleh kosong jika riwayat dari luar
+  petugas           User?       @relation("PetugasImunisasi", fields: [petugasId], references: [id])
+  
+  catatan           String?     @db.Text
+  
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+}
+
+// ==========================================
 // MODUL UKM (PELAYANAN KESEHATAN MASYARAKAT)
 // ==========================================
 
@@ -670,21 +835,29 @@ model ProgramUKM {
 }
 
 model RegisterUKM {
-  id              String      @id @default(cuid())
+  id                    String      @id @default(cuid())
   
-  pasienId        String
-  pasien          Pasien      @relation(fields: [pasienId], references: [id], onDelete: Cascade)
+  // ==========================================
+  // [BARU] PONDASI INTEGRASI SATUSEHAT
+  // ==========================================
+  satusehatEpisodeId    String?     @unique // ID balasan dari API EpisodeOfCare
+  satusehatConditionId  String?     @unique // ID balasan dari API Condition
+  diagnosaAwal          String?     // Kode ICD-10 Spesifik (Cth: A15.0 untuk TB, B20 untuk HIV, Z34 untuk Kehamilan)
   
-  programId       String
-  program         ProgramUKM  @relation(fields: [programId], references: [id], onDelete: Restrict)
+  // Relasi Internal (Eksisting)
+  pasienId              String
+  pasien                Pasien      @relation(fields: [pasienId], references: [id], onDelete: Cascade)
   
-  tanggalDaftar   DateTime    @default(now())
-  statusProgram   String      @default("AKTIF") // AKTIF, SEMBUH, PUTUS_OBAT, MENINGGAL, RUJUK
+  programId             String
+  program               ProgramUKM  @relation(fields: [programId], references: [id], onDelete: Restrict)
   
-  createdAt       DateTime    @default(now())
-  updatedAt       DateTime    @updatedAt
+  tanggalDaftar         DateTime    @default(now())
+  statusProgram         String      @default("AKTIF") // AKTIF, SEMBUH, PUTUS_OBAT, MENINGGAL, RUJUK
   
-  logPemantauan   LogPemantauanUKM[]
+  createdAt             DateTime    @default(now())
+  updatedAt             DateTime    @updatedAt
+  
+  logPemantauan         LogPemantauanUKM[]
 
   @@unique([pasienId, programId])
 }

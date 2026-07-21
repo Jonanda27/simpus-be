@@ -10,5 +10,6 @@ router.use(protect);
 router.get('/screening', kunjunganController.getKunjunganScreening);
 router.get('/:id', kunjunganController.getKunjunganById);
 router.post('/:id/panggil', kunjunganController.panggilKunjungan);
+router.put('/:id/status', kunjunganController.updateStatusKunjungan);
 
 module.exports = router;
