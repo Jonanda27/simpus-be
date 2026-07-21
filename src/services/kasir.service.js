@@ -57,23 +57,61 @@ const generateTagihan = async (kunjunganId) => {
   const details = [];
   let totalBiaya = 0;
 
-  // 1. Karcis / Administrasi
-  const tarifKarcis = 15000;
+  // 1. Karcis / Administrasi Pendaftaran
+  let codeAdm = 'TRF-ADM-01'; // Default Rawat Jalan
+  let nameAdm = 'Karcis Pendaftaran Rawat Jalan';
+  let priceAdm = 15000;
+
+  if (kunjungan.jenisPelayanan === 'Rawat Inap') {
+    codeAdm = 'TRF-ADM-02';
+    nameAdm = 'Karcis Pendaftaran Rawat Inap';
+    priceAdm = 25000;
+  } else if (kunjungan.jenisPelayanan === 'IGD') {
+    codeAdm = 'TRF-ADM-03';
+    nameAdm = 'Karcis Pendaftaran IGD';
+    priceAdm = 20000;
+  }
+
+  const dbTarifAdm = await prisma.masterTarifPelayanan.findUnique({
+    where: { kodeTarif: codeAdm }
+  });
+
+  if (dbTarifAdm && dbTarifAdm.statusAktif) {
+    nameAdm = dbTarifAdm.namaTarif;
+    priceAdm = dbTarifAdm.tarif;
+  }
+
   details.push({
-    namaItem: 'Karcis Pendaftaran & Konsultasi',
+    namaItem: nameAdm,
     kategori: 'Pendaftaran',
     jumlah: 1,
-    hargaSatuan: tarifKarcis,
-    subTotal: tarifKarcis,
+    hargaSatuan: priceAdm,
+    subTotal: priceAdm,
   });
-  totalBiaya += tarifKarcis;
+  totalBiaya += priceAdm;
 
-  // 2. Tindakan (Dummy 50.000)
+  // 2. Tindakan Medis
   if (kunjungan.tindakans && kunjungan.tindakans.length > 0) {
     for (const t of kunjungan.tindakans) {
-      const tarifTindakan = 50000;
+      let tarifTindakan = 50000; // Default fallback
+      let namaTindakan = `Tindakan: ${t.icd9?.nama_prosedur || 'Prosedur Medis'}`;
+
+      if (t.icd9Id) {
+        const dbTarifTnd = await prisma.masterTarifPelayanan.findFirst({
+          where: {
+            icd9Id: t.icd9Id,
+            kategori: 'TINDAKAN',
+            statusAktif: true
+          }
+        });
+        if (dbTarifTnd) {
+          tarifTindakan = dbTarifTnd.tarif;
+          namaTindakan = dbTarifTnd.namaTarif;
+        }
+      }
+
       details.push({
-        namaItem: `Tindakan: ${t.icd9?.nama_prosedur || 'Prosedur Medis'}`,
+        namaItem: namaTindakan,
         kategori: 'Tindakan',
         jumlah: 1,
         hargaSatuan: tarifTindakan,
@@ -83,19 +121,36 @@ const generateTagihan = async (kunjunganId) => {
     }
   }
 
-  // 3. Obat / Resep (Dummy 10.000 per obat)
+  // 3. Obat / Resep (Dihitung dinamis HNA + Margin + Tuslah)
   if (kunjungan.resep && kunjungan.resep.length > 0) {
     for (const r of kunjungan.resep) {
       if (r.details) {
         for (const detail of r.details) {
-          const tarifObat = 10000; // Harusnya diambil dari detail.obat.harga
+          let priceObat = detail.obat?.harga || 10000; // HNA base
           const qty = detail.jumlah;
-          const subTotalObat = tarifObat * qty;
+          
+          if (detail.obat) {
+            // Cari margin/tuslah di MasterTarifFarmasi berdasarkan kategori obat
+            const dbTarifObt = await prisma.masterTarifFarmasi.findFirst({
+              where: {
+                kategoriObat: { equals: detail.obat.kategori, mode: 'insensitive' },
+                statusAktif: true
+              }
+            });
+            
+            if (dbTarifObt) {
+              const margin = dbTarifObt.marginPersen / 100;
+              const calculatedPrice = (detail.obat.harga * (1 + margin)) + dbTarifObt.tuslah;
+              priceObat = Math.round(calculatedPrice);
+            }
+          }
+
+          const subTotalObat = priceObat * qty;
           details.push({
             namaItem: `Obat: ${detail.obat?.namaObat || 'Obat Generik'}`,
             kategori: 'Obat',
             jumlah: qty,
-            hargaSatuan: tarifObat,
+            hargaSatuan: priceObat,
             subTotal: subTotalObat,
           });
           totalBiaya += subTotalObat;
@@ -104,12 +159,29 @@ const generateTagihan = async (kunjunganId) => {
     }
   }
 
-  // 4. Lab (Dummy 30.000 per parameter)
+  // 4. Pemeriksaan Laboratorium
   if (kunjungan.orderLab && kunjungan.orderLab.details) {
     for (const detail of kunjungan.orderLab.details) {
-      const tarifLab = 30000;
+      let tarifLab = 30000; // Default fallback
+      let namaLab = `Lab: ${detail.parameter}`;
+
+      const dbTarifLab = await prisma.masterTarifPelayanan.findFirst({
+        where: {
+          kategori: 'LABORATORIUM',
+          statusAktif: true,
+          lab: {
+            parameter: { equals: detail.parameter, mode: 'insensitive' }
+          }
+        }
+      });
+
+      if (dbTarifLab) {
+        tarifLab = dbTarifLab.tarif;
+        namaLab = dbTarifLab.namaTarif;
+      }
+
       details.push({
-        namaItem: `Lab: ${detail.parameter}`,
+        namaItem: namaLab,
         kategori: 'Laboratorium',
         jumlah: 1,
         hargaSatuan: tarifLab,
@@ -202,6 +274,74 @@ const prosesPembayaran = async (tagihanId, userId, data) => {
       where: { id: tagihan.kunjunganId },
       data: { statusKunjungan: 'SELESAI' },
     });
+
+    // 4. Cari dan selesaikan resep yang belum diproses (potong stok FEFO)
+    const pendingReseps = await tx.resep.findMany({
+      where: {
+        kunjunganId: tagihan.kunjunganId,
+        status: 'MENUNGGU_FARMASI'
+      },
+      include: {
+        details: true
+      }
+    });
+
+    for (const resep of pendingReseps) {
+      for (const detail of resep.details) {
+        const obat = await tx.masterObat.findUnique({
+          where: { id: detail.obatId }
+        });
+
+        if (obat) {
+          // Kurangi stok MasterObat (jangan biarkan negatif, minimal 0)
+          const newStok = Math.max(0, obat.stok - detail.jumlah);
+          await tx.masterObat.update({
+            where: { id: detail.obatId },
+            data: { stok: newStok }
+          });
+
+          // Kurangi stok pada AsetLogistik menggunakan metode FEFO
+          let remainingToDeduct = detail.jumlah;
+          const batches = await tx.asetLogistik.findMany({
+            where: {
+              masterObatId: detail.obatId,
+              stok: { gt: 0 }
+            },
+            orderBy: [
+              { tanggalExpired: 'asc' }
+            ]
+          });
+
+          for (const batch of batches) {
+            if (remainingToDeduct <= 0) break;
+
+            if (batch.stok >= remainingToDeduct) {
+              await tx.asetLogistik.update({
+                where: { id: batch.id },
+                data: {
+                  stok: {
+                    decrement: remainingToDeduct
+                  }
+                }
+              });
+              remainingToDeduct = 0;
+            } else {
+              remainingToDeduct -= batch.stok;
+              await tx.asetLogistik.update({
+                where: { id: batch.id },
+                data: { stok: 0 }
+              });
+            }
+          }
+        }
+      }
+
+      // Tandai resep sebagai SELESAI
+      await tx.resep.update({
+        where: { id: resep.id },
+        data: { status: 'SELESAI' }
+      });
+    }
 
     return updatedTagihan;
   });

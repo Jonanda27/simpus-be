@@ -108,6 +108,7 @@ exports.prosesResep = async (req, res) => {
           throw new Error(`Stok obat ${obatLama.namaObat} tidak mencukupi. Tersedia: ${obatLama.stok}, Diminta: ${detail.jumlah}`);
         }
 
+        // A. Kurangi stok pada MasterObat
         await tx.masterObat.update({
           where: { id: detail.obatId },
           data: {
@@ -116,6 +117,46 @@ exports.prosesResep = async (req, res) => {
             }
           }
         });
+
+        // B. Kurangi stok pada AsetLogistik menggunakan metode FEFO (First Expired First Out)
+        let remainingToDeduct = detail.jumlah;
+        
+        // Ambil semua batch logistik medis untuk obat ini yang stoknya > 0, diurutkan dari tanggal expired terdekat
+        const batches = await tx.asetLogistik.findMany({
+          where: {
+            masterObatId: detail.obatId,
+            stok: { gt: 0 }
+          },
+          orderBy: [
+            { tanggalExpired: 'asc' }
+          ]
+        });
+
+        for (const batch of batches) {
+          if (remainingToDeduct <= 0) break;
+
+          if (batch.stok >= remainingToDeduct) {
+            // Pengurangan penuh pada batch ini
+            await tx.asetLogistik.update({
+              where: { id: batch.id },
+              data: {
+                stok: {
+                  decrement: remainingToDeduct
+                }
+              }
+            });
+            remainingToDeduct = 0;
+          } else {
+            // Kurangi stok batch ini sampai habis
+            remainingToDeduct -= batch.stok;
+            await tx.asetLogistik.update({
+              where: { id: batch.id },
+              data: {
+                stok: 0
+              }
+            });
+          }
+        }
       }
 
       // 3. Update status Resep menjadi SELESAI

@@ -51,15 +51,30 @@ const klinikService = {
   },
 
   createLayanan: async (data) => {
-    return await prisma.layananKlinik.create({
-      data: {
-        poliklinikId: data.poliklinikId,
-        kodeLayanan: data.kodeLayanan,
-        namaLayanan: data.namaLayanan,
-        deskripsi: data.deskripsi,
-        tarifDasar: data.tarifDasar ? parseFloat(data.tarifDasar) : 0,
-        statusAktif: data.statusAktif !== undefined ? data.statusAktif : true,
-      },
+    return await prisma.$transaction(async (tx) => {
+      const layanan = await tx.layananKlinik.create({
+        data: {
+          poliklinikId: data.poliklinikId,
+          kodeLayanan: data.kodeLayanan,
+          namaLayanan: data.namaLayanan,
+          deskripsi: data.deskripsi,
+          tarifDasar: data.tarifDasar ? parseFloat(data.tarifDasar) : 0,
+          statusAktif: data.statusAktif !== undefined ? data.statusAktif : true,
+        },
+      });
+
+      // Sinkronisasi ke MasterTarifPelayanan via MasterICD9 jika kode layanan ada di ICD-9
+      const icd9 = await tx.masterICD9.findUnique({
+        where: { kode_icd9: data.kodeLayanan }
+      });
+      if (icd9) {
+        await tx.masterTarifPelayanan.updateMany({
+          where: { icd9Id: icd9.id_icd9, kategori: 'TINDAKAN' },
+          data: { tarif: parseFloat(data.tarifDasar) || 0 }
+        });
+      }
+
+      return layanan;
     });
   },
 
@@ -67,9 +82,24 @@ const klinikService = {
     if (data.tarifDasar !== undefined) {
       data.tarifDasar = parseFloat(data.tarifDasar);
     }
-    return await prisma.layananKlinik.update({
-      where: { id },
-      data,
+    return await prisma.$transaction(async (tx) => {
+      const layanan = await tx.layananKlinik.update({
+        where: { id },
+        data,
+      });
+
+      // Sinkronisasi ke MasterTarifPelayanan via MasterICD9 jika kode layanan ada di ICD-9
+      const icd9 = await tx.masterICD9.findUnique({
+        where: { kode_icd9: layanan.kodeLayanan }
+      });
+      if (icd9) {
+        await tx.masterTarifPelayanan.updateMany({
+          where: { icd9Id: icd9.id_icd9, kategori: 'TINDAKAN' },
+          data: { tarif: parseFloat(layanan.tarifDasar) || 0 }
+        });
+      }
+
+      return layanan;
     });
   }
 };

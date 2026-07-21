@@ -429,6 +429,7 @@ model MasterICD9 {
   kategori  String
   
   tindakans TindakanPasien[]
+  tarifs    MasterTarifPelayanan[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -442,6 +443,8 @@ model MasterLaboratorium {
   satuan       String?
   nilaiRujukan String?
   
+  tarifs       MasterTarifPelayanan[]
+
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 }
@@ -520,6 +523,7 @@ model MasterObat {
   updatedAt       DateTime    @updatedAt
 
   resepDetails    ResepDetail[]
+  asets           AsetLogistik[]
 }
 
 model Resep {
@@ -700,4 +704,181 @@ model LogPemantauanUKM {
   catatan         String      @db.Text
   tindakLanjut    String?
   statusBerobat   String?     // Lanjut, Putus Obat, dll
+}
+
+// ==========================================
+// MODUL LOGISTIK & ASET
+// ==========================================
+
+// Model Baru: Master Ruangan
+model Ruangan {
+  id          String   @id @default(cuid())
+  namaRuangan String   @unique
+  lokasi      String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  asets       Aset[]   @relation("RuanganAset")
+}
+
+// Model Utama: Aset
+model Aset {
+  id           String   @id @default(cuid())
+  kodeAset     String   @unique
+  namaAset     String
+  kategori     String   // 'LOGISTIK_MEDIS', 'LOGISTIK_UMUM', 'ALKES', 'INVENTARIS', 'KENDARAAN'
+  deskripsi    String?
+  status       String   @default("AKTIF") // 'AKTIF', 'RUSAK', 'MAINTENANCE', 'DISPOSED'
+  gambarUrl    String?
+  
+  // Lokasi penempatan ruangan
+  ruanganId    String?
+  ruangan      Ruangan? @relation("RuanganAset", fields: [ruanganId], references: [id], onDelete: SetNull)
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Relasi Sub-Kategori 1-to-1
+  logistik     AsetLogistik?
+  alkes        AsetAlkes?
+  kendaraan    AsetKendaraan?
+  inventaris   AsetInventaris?
+
+  // Persiapan Fase Selanjutnya (Relasi Histori)
+  maintenances AsetMaintenance[]
+  kalibrasis   AsetKalibrasi[]
+}
+
+// Detail Kategori 1 & 2: Logistik Medis & Logistik Umum
+model AsetLogistik {
+  id             String      @id @default(cuid())
+  asetId         String      @unique
+  aset           Aset        @relation(fields: [asetId], references: [id], onDelete: Cascade)
+  
+  // Menghubungkan secara opsional ke MasterObat untuk integrasi farmasi
+  masterObatId   String?     
+  masterObat     MasterObat? @relation(fields: [masterObatId], references: [id], onDelete: SetNull)
+
+  subKategori    String      // 'OBAT', 'VAKSIN', 'BHP_MEDIS', 'ATK', 'KEBERSIHAN', 'CETAKAN'
+  sediaan        String?     // tablet, sirup, ampul, box, rim, botol, pcs
+  nomorBatch     String?     // opsional untuk logistik umum
+  tanggalExpired DateTime?   // opsional untuk logistik umum
+  hargaBeli      Float       @default(0) // harga beli satuan
+  stok           Int         @default(0) // kuantitas stok saat ini (untuk non-master-obat)
+  stokMinimum    Int         @default(0) // buffer stock
+  supplier       String?     // vendor/distributor
+  lokasiSpesifik String?     // Gudang Farmasi, Gudang Vaksin, Suhu Kulkas, dll.
+}
+
+// Detail Kategori 3: Alat Kesehatan
+model AsetAlkes {
+  id                       String    @id @default(cuid())
+  asetId                   String    @unique
+  aset                     Aset      @relation(fields: [asetId], references: [id], onDelete: Cascade)
+  
+  merk                     String?   
+  nomorSeri                String?   // Serial Number
+  tanggalPembelian         DateTime? 
+  hargaPerolehan           Float     @default(0)
+  
+  wajibKalibrasi           Boolean   @default(false)
+  noSertifikatKalibrasi    String?   
+  tanggalKalibrasiTerakhir DateTime?
+  intervalKalibrasi        Int?      // Dalam bulan
+  intervalMaintenance      Int?      // Dalam bulan (Jadwal Maintenance)
+  kondisi                  String    @default("BAIK") // 'BAIK', 'RUSAK_RINGAN', 'RUSAK_BERAT'
+}
+
+// Detail Kategori 4: Inventaris Umum, Gedung & Tetap
+model AsetInventaris {
+  id              String    @id @default(cuid())
+  asetId          String    @unique
+  aset            Aset      @relation(fields: [asetId], references: [id], onDelete: Cascade)
+  
+  subKategori     String    // 'ELEKTRONIK', 'MEBEL', 'BANGUNAN', 'MESIN'
+  tanggalPembelian DateTime
+  nilaiBeli       Float     @default(0)
+  masaPakai       Int       // Masa Pakai / Umur Ekonomis (Tahun)
+  pic             String?   // Penanggung Jawab
+}
+
+// Detail Kategori 5: Kendaraan (Ambulans / Pusling)
+model AsetKendaraan {
+  id                 String    @id @default(cuid())
+  asetId             String    @unique
+  aset               Aset      @relation(fields: [asetId], references: [id], onDelete: Cascade)
+  
+  nomorPolisi        String    @unique
+  jenisKendaraan     String    // 'AMBULANS_TRANSPORT', 'AMBULANS_IGD', 'MOTOR_PUSLING', dll.
+  merk               String?   // Toyota Hiace 2023, dll.
+  nomorRangka        String?
+  nomorMesin         String?
+  tanggalPajak       DateTime? // Tanggal Jatuh Tempo Pajak
+  idGps              String?   // ID GPS Tracker
+  intervalMaintenance Int?      // Interval rutin maintenance (bulan)
+  pic                String?   // Penanggung Jawab / Supir Utama
+  kondisi            String    @default("STANDBY") // 'STANDBY', 'BERTUGAS', 'BENGKEL'
+}
+
+// Histori Perawatan / Servis Aset
+model AsetMaintenance {
+  id          String   @id @default(cuid())
+  asetId      String
+  aset        Aset     @relation(fields: [asetId], references: [id], onDelete: Cascade)
+  
+  tanggal     DateTime
+  jenis       String   // 'RUTIN', 'PERBAIKAN'
+  deskripsi   String   @db.Text
+  biaya       Float    @default(0)
+  pelaksana   String?  // Pihak ketiga / internal teknisi
+  status      String   @default("SELESAI") // 'DIJADWALKAN', 'PROSES', 'SELESAI'
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// Histori Kalibrasi Alkes
+model AsetKalibrasi {
+  id            String   @id @default(cuid())
+  asetId        String
+  aset        Aset     @relation(fields: [asetId], references: [id], onDelete: Cascade)
+  
+  tanggal       DateTime
+  noSertifikat  String
+  institusi     String   // Lembaga penguji kalibrasi
+  hasil         String   // 'LAYAK', 'TIDAK_LAYAK'
+  expiredDate   DateTime
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+// Master Tarif Pelayanan (Perda/Perkada)
+model MasterTarifPelayanan {
+  id             String      @id @default(cuid())
+  kodeTarif      String      @unique
+  namaTarif      String
+  kategori       String      // 'PENDAFTARAN', 'TINDAKAN', 'RAWAT_INAP', 'ALAT_MEDIS', 'LABORATORIUM', 'OPERASIONAL'
+  tarif          Float       @default(0)
+  deskripsi      String?     @db.Text
+  statusAktif    Boolean     @default(true)
+  
+  icd9Id         String?     
+  icd9           MasterICD9? @relation(fields: [icd9Id], references: [id_icd9], onDelete: SetNull)
+
+  labId          String?
+  lab            MasterLaboratorium? @relation(fields: [labId], references: [id], onDelete: SetNull)
+
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+}
+
+// Master Tarif Farmasi (Margin & Tuslah)
+model MasterTarifFarmasi {
+  id             String   @id @default(cuid())
+  kategoriObat   String   @unique // e.g. 'Obat', 'Vaksin', 'BHP Medis'
+  marginPersen   Float    @default(0)
+  tuslah         Float    @default(0)
+  deskripsi      String?  @db.Text
+  statusAktif    Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 }

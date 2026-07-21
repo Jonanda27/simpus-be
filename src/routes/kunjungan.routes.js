@@ -9,6 +9,7 @@ router.use(protect);
 
 router.get('/screening', kunjunganController.getKunjunganScreening);
 router.get('/:id', kunjunganController.getKunjunganById);
+router.get('/:id/fhir-preview', kunjunganController.getKunjunganFhirPreview);
 router.post('/:id/panggil', kunjunganController.panggilKunjungan);
 
 module.exports = router;

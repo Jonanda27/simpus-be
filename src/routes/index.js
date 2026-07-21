@@ -14,6 +14,8 @@ const farmasiRoute = require('./farmasi.routes');
 const laboratoriumRoute = require('./laboratorium.routes');
 const kasirRoute = require('./kasir.route');
 const ukmRoute = require('./ukm.route');
+const asetRoute = require('./aset.routes');
+const keuanganRoute = require('./keuangan.routes');
 const router = express.Router();
 
 const defaultRoutes = [
@@ -76,6 +78,14 @@ const defaultRoutes = [
   {
     path: '/ukm',
     route: ukmRoute,
+  },
+  {
+    path: '/aset',
+    route: asetRoute,
+  },
+  {
+    path: '/keuangan',
+    route: keuanganRoute,
   }
 ];
 

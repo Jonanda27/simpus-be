@@ -51,13 +51,21 @@ async function main() {
 
   // 3. Seed Master Laboratorium
   const labCategories = {
-    'Hematologi': ['Hemoglobin (Hb)', 'Leukosit', 'Eritrosit', 'Hematokrit', 'Trombosit', 'Hitung Jenis Leukosit', 'LED', 'Golongan Darah', 'Rhesus'],
-    'Kimia Klinik': ['Gula Darah (Sewaktu, Puasa, 2 Jam PP)', 'HbA1c', 'Kolesterol Total', 'HDL', 'LDL', 'Trigliserida', 'Asam Urat', 'Ureum', 'Kreatinin', 'SGOT', 'SGPT', 'Bilirubin', 'Albumin'],
-    'Urinalisis': ['Urinalisis Lengkap', 'Protein Urine', 'Glukosa Urine', 'Sedimen Urine', 'Tes Kehamilan'],
-    'Mikrobiologi': ['BTA TB', 'TCM/Xpert MTB-RIF', 'Kultur Bakteri', 'Uji Resistensi Antibiotik', 'Pewarnaan Gram'],
-    'Imunologi/Serologi': ['HIV', 'HBsAg', 'Anti HCV', 'VDRL', 'TPHA', 'Dengue (NS1, IgM, IgG)'],
-    'Parasitologi': ['Feses Lengkap', 'Telur Cacing', 'Malaria'],
-    'Patologi Klinik Lain': ['Analisa Gas Darah', 'Elektrolit', 'CRP', 'Prokalsitonin'],
+    'HEMATOLOGI': ['Hematologi Rutin/CBC', 'Hematologi Lengkap (CBC, LED, Hitung Jenis)', 'Hemoglobin', 'LED', 'Eritrosit', 'Leukosit', 'Trombosit', 'Hematokrit', 'Golongan Darah A,B,O & Rh', 'Gambaran Darah Tepi'],
+    'URINALISA & FAECES': ['Urine Rutin', 'Protein Total (Urine 24 jam)', 'Faeces Rutin', 'Darah Samar (FIT)'],
+    'KIMIA DARAH DASAR': ['Glukosa Puasa', 'Glukosa 2 Jam PP', 'Glukosa Sewaktu', 'Ureum', 'Kreatinin', 'Cholesterol Total', 'Trigliserida', 'SGOT', 'SGPT'],
+    'ANEMIA': ['Hematologi Rutin + Retikulosit', 'Retikulosit', 'Besi', 'UIBC Direk', 'TIBC', 'Ferritin', 'Transferrin'],
+    'FAAL HEMOSTASIS': ['Waktu Perdarahan', 'Waktu Pembekuan', 'Waktu Protrombin', 'Waktu Trombin', 'APTT', 'Fibrinogen', 'D-Dimer', 'AT III'],
+    'FAAL HATI (Lanjutan)': ['Gamma GT', 'Fosfatase Alkali', 'CHE', 'Bilirubin Total', 'Bilirubin Direk', 'Protein Total', 'Albumin', 'Globulin'],
+    'DIABETES (Lanjutan)': ['TTGO', 'HbA1c', 'Insulin'],
+    'LEMAK (Lanjutan)': ['Cholesterol LDL Direk', 'Cholesterol HDL', 'Apo A1', 'Apo B'],
+    'JANTUNG': ['CK', 'CK-MB', 'Troponin I', 'hs-Troponin I Kuantitatif', 'LDH', 'NT-Pro BNP'],
+    'GINJAL - HIPERTENSI (Lanjutan)': ['Asam Urat', 'Cystatin-C', 'Albumin Urine Kuantitatif', 'Rasio Albumin-Kreatinin', 'Renin (PRA)', 'Aldosteron'],
+    'ELEKTROLIT - GAS DARAH': ['Na, K, Cl', 'Kalsium', 'Fosfor Anorganik', 'Magnesium', 'Analisis Gas Darah'],
+    'INFEKSI & HEPATITIS': ['HBsAg', 'Anti-HBs', 'Anti-HCV', 'Anti-HAV IgM', 'Widal', 'Dengue NS1 Antigen', 'Anti-Dengue IgG & IgM', 'Malaria (Mikroskopik)', 'Anti-HIV', 'VDRL/RPR'],
+    'TIROID': ['FT3', 'FT4', 'TSHs', 'T3 (Total)', 'T4 (Total)'],
+    'TUMOR MARKER': ['AFP', 'CEA', 'PSA', 'CA 125', 'CA 15-3', 'CA 19-9'],
+    'IMUNOLOGI': ['ASTO', 'RF', 'CRP Kualitatif', 'hs-CRP', 'ANA (IF)', 'Anti-dsDNA']
   };
 
   for (const [kategori, parameters] of Object.entries(labCategories)) {
