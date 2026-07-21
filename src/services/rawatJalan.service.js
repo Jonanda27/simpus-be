@@ -213,7 +213,10 @@ const mulaiPemeriksaan = async (kunjunganId, dokterId) => {
     if (['MENUNGGU', 'MENUNGGU_DOKTER'].includes(kunjungan.statusKunjungan)) {
       await tx.kunjungan.update({
         where: { id: kunjunganId },
-        data: { statusKunjungan: 'DIPERIKSA' },
+        data: {
+          statusKunjungan: 'DIPERIKSA',
+          waktuPemeriksaanMulai: new Date(),
+        },
       });
     }
 
@@ -537,6 +540,15 @@ const selesaikanPemeriksaan = async (kunjunganId, user) => {
       data: updateData,
     });
 
+    await tx.kunjungan.update({
+      where: { id: kunjunganId },
+      data: {
+        statusPulang: 'PULANG_SEMBUH',
+        waktuPemeriksaanSelesai: new Date(),
+      },
+    });
+
+    return rm;
   });
 };
 
@@ -725,7 +737,11 @@ const simpanRujukan = async (kunjunganId, dokterId, rujukanData) => {
     // Akhiri kunjungan dari poli
     await tx.kunjungan.update({
       where: { id: kunjunganId },
-      data: { statusKunjungan: 'MENUNGGU_KASIR' },
+      data: {
+        statusKunjungan: 'MENUNGGU_KASIR',
+        statusPulang: 'DIRUJUK_RS',
+        waktuPemeriksaanSelesai: new Date()
+      },
     });
 
     return rujukan;
@@ -738,7 +754,11 @@ const simpanRujukan = async (kunjunganId, dokterId, rujukanData) => {
 const pulang = async (kunjunganId) => {
   return await prisma.kunjungan.update({
     where: { id: kunjunganId },
-    data: { statusKunjungan: 'MENUNGGU_KASIR' },
+    data: {
+      statusKunjungan: 'MENUNGGU_KASIR',
+      statusPulang: 'PULANG_SEMBUH',
+      waktuPemeriksaanSelesai: new Date()
+    },
   });
 };
 

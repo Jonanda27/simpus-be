@@ -1,5 +1,6 @@
 const buildEncounterPayload = (data, orgId) => {
-  const startEncounter = new Date().toISOString();
+  const startEncounter = data.waktuRegistrasi || data.waktuPemeriksaanMulai || new Date().toISOString();
+  const endEncounter = data.waktuPemeriksaanSelesai || (data.status === 'finished' ? new Date().toISOString() : undefined);
 
   // Map Jenis Pelayanan lokal ke FHIR Class
   let classCode = "AMB"; // Default Ambulatory (Rawat Jalan)
@@ -16,9 +17,11 @@ const buildEncounterPayload = (data, orgId) => {
     }
   }
 
-  return {
+  const status = data.status || "arrived";
+
+  const payload = {
     resourceType: "Encounter",
-    status: "arrived",
+    status: status,
     class: {
       system: "http://terminology.hl7.org/CodeSystem/v3-ActCode",
       code: classCode,
@@ -48,15 +51,31 @@ const buildEncounterPayload = (data, orgId) => {
       }
     ],
     period: {
-      start: startEncounter
+      start: startEncounter,
+      end: endEncounter
     },
     statusHistory: [
       {
         status: "arrived",
         period: {
-          start: startEncounter
+          start: startEncounter,
+          end: data.waktuPemeriksaanMulai || startEncounter
         }
-      }
+      },
+      ...(data.waktuPemeriksaanMulai ? [{
+        status: "in-progress",
+        period: {
+          start: data.waktuPemeriksaanMulai,
+          end: endEncounter
+        }
+      }] : []),
+      ...(status === 'finished' ? [{
+        status: "finished",
+        period: {
+          start: endEncounter,
+          end: endEncounter
+        }
+      }] : [])
     ],
     location: [
       {
@@ -72,10 +91,37 @@ const buildEncounterPayload = (data, orgId) => {
     identifier: [
       {
         system: `http://sys-ids.kemkes.go.id/encounter/${orgId}`,
-        value: data.noKunjungan
+        value: data.noKunjungan || data.id
       }
     ]
   };
+
+  if (data.statusPulang) {
+    let dischargeCode = "home";
+    let dischargeDisplay = "Home";
+    if (data.statusPulang === 'DIRUJUK_RS') {
+      dischargeCode = "oth";
+      dischargeDisplay = "Referred to external facility / Hospital";
+    } else if (data.statusPulang === 'RAWAT_INAP') {
+      dischargeCode = "hosp";
+      dischargeDisplay = "Admitted to inpatient ward";
+    }
+
+    payload.hospitalization = {
+      dischargeDisposition: {
+        coding: [
+          {
+            system: "http://terminology.hl7.org/CodeSystem/discharge-disposition",
+            code: dischargeCode,
+            display: dischargeDisplay
+          }
+        ],
+        text: data.statusPulang
+      }
+    };
+  }
+
+  return payload;
 };
 
 module.exports = { buildEncounterPayload };

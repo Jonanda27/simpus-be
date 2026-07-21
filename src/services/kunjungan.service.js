@@ -394,7 +394,645 @@ const getDokterDashboardStats = async (user) => {
     selesai
   };
 };
->>>>>>> 7a11745aa81908bd40805ab3a59f7ef554a2da31
+
+const getKunjunganFhirPreview = async (id) => {
+  const kunjungan = await prisma.kunjungan.findUnique({
+    where: { id },
+    include: {
+      pasien: {
+        include: {
+          alamat: true,
+        }
+      },
+      poliklinik: true,
+      dokterTujuan: {
+        select: { id: true, namaLengkap: true, username: true }
+      },
+      screening: true,
+      rekamMedis: true,
+      rujukanKeluar: true,
+      orderLab: {
+        include: {
+          details: true
+        }
+      },
+      diagnosis: {
+        include: {
+          icd10: true
+        }
+      },
+      tindakans: {
+        include: {
+          icd9: true
+        }
+      },
+      resep: {
+        include: {
+          details: {
+            include: {
+              obat: true
+            }
+          }
+        }
+      }
+    }
+  });
+
+  if (!kunjungan) {
+    const err = new Error('Data Kunjungan tidak ditemukan');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const { pasien, screening, rekamMedis, rujukanKeluar, orderLab, diagnosis, tindakans, resep, poliklinik, dokterTujuan } = kunjungan;
+  
+  // Construct FHIR Bundle
+  const bundle = {
+    resourceType: "Bundle",
+    type: "collection",
+    timestamp: new Date().toISOString(),
+    entry: []
+  };
+
+  // 1. Patient Resource
+  const patientResource = {
+    resourceType: "Patient",
+    id: pasien.noIHS || pasien.id,
+    identifier: [
+      {
+        use: "official",
+        system: "https://fhir.kemkes.go.id/id/nik",
+        value: pasien.nik
+      }
+    ],
+    name: [
+      {
+        use: "official",
+        text: pasien.namaLengkap
+      }
+    ],
+    gender: pasien.jenisKelamin === 'Laki-laki' ? 'male' : 'female',
+    birthDate: pasien.tanggalLahir ? new Date(pasien.tanggalLahir).toISOString().split('T')[0] : null
+  };
+  bundle.entry.push({ resource: patientResource });
+
+  // 2. Encounter Resource
+  let encounterStatus = "arrived";
+  if (['DIPERIKSA', 'DIPROSES_SCREENING'].includes(kunjungan.statusKunjungan)) encounterStatus = "in-progress";
+  else if (['SELESAI', 'MENUNGGU_KASIR', 'MENUNGGU_FARMASI', 'PULANG'].includes(kunjungan.statusKunjungan)) encounterStatus = "finished";
+  else if (kunjungan.statusKunjungan === 'BATAL') encounterStatus = "cancelled";
+
+  const periodStart = kunjungan.waktuPemeriksaanMulai 
+    ? new Date(kunjungan.waktuPemeriksaanMulai).toISOString() 
+    : new Date(kunjungan.tanggalRegistrasi).toISOString();
+    
+  const periodEnd = kunjungan.waktuPemeriksaanSelesai 
+    ? new Date(kunjungan.waktuPemeriksaanSelesai).toISOString() 
+    : new Date(kunjungan.updatedAt).toISOString();
+
+  // Map discharge disposition if available
+  let dischargeDisp = undefined;
+  if (kunjungan.statusPulang === 'DIRUJUK_RS') {
+    dischargeDisp = {
+      coding: [
+        {
+          system: "http://terminology.hl7.org/CodeSystem/discharge-disposition",
+          code: "oth",
+          display: "Referred to external facility / Hospital"
+        }
+      ],
+      text: "Dirujuk ke Rumah Sakit"
+    };
+  } else if (kunjungan.statusPulang === 'RAWAT_INAP') {
+    dischargeDisp = {
+      coding: [
+        {
+          system: "http://terminology.hl7.org/CodeSystem/discharge-disposition",
+          code: "hosp",
+          display: "Admitted to inpatient ward"
+        }
+      ],
+      text: "Rawat Inap"
+    };
+  } else if (kunjungan.statusPulang === 'KONTROL_ULANG') {
+    dischargeDisp = {
+      coding: [
+        {
+          system: "http://terminology.hl7.org/CodeSystem/discharge-disposition",
+          code: "home",
+          display: "Discharged to home with follow-up appointment"
+        }
+      ],
+      text: "Pulang dengan Kontrol Ulang"
+    };
+  } else if (kunjungan.statusPulang === 'PULANG_SEMBUH') {
+    dischargeDisp = {
+      coding: [
+        {
+          system: "http://terminology.hl7.org/CodeSystem/discharge-disposition",
+          code: "home",
+          display: "Home"
+        }
+      ],
+      text: "Pulang Sembuh"
+    };
+  }
+
+  const encounterResource = {
+    resourceType: "Encounter",
+    id: kunjungan.satusehatId || kunjungan.id,
+    status: encounterStatus,
+    class: {
+      system: "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+      code: kunjungan.jenisPelayanan === 'Rawat Inap' ? 'IMP' : (kunjungan.jenisPelayanan === 'IGD' ? 'EMER' : 'AMB'),
+      display: kunjungan.jenisPelayanan === 'Rawat Inap' ? 'inpatient encounter' : (kunjungan.jenisPelayanan === 'IGD' ? 'emergency encounter' : 'ambulatory')
+    },
+    subject: {
+      reference: `Patient/${pasien.noIHS || pasien.id}`,
+      display: pasien.namaLengkap
+    },
+    period: {
+      start: periodStart,
+      end: encounterStatus === "finished" ? periodEnd : undefined
+    },
+    location: [
+      {
+        location: {
+          reference: `Location/${poliklinik?.ihsLocationId || poliklinik?.id || 'poli-umum'}`,
+          display: poliklinik?.namaPoli || "Poli Umum"
+        }
+      }
+    ],
+    statusHistory: [
+      {
+        status: "arrived",
+        period: {
+          start: new Date(kunjungan.tanggalRegistrasi).toISOString(),
+          end: kunjungan.waktuPemeriksaanMulai ? new Date(kunjungan.waktuPemeriksaanMulai).toISOString() : undefined
+        }
+      },
+      ...(kunjungan.waktuPemeriksaanMulai ? [{
+        status: "in-progress",
+        period: {
+          start: new Date(kunjungan.waktuPemeriksaanMulai).toISOString(),
+          end: kunjungan.waktuPemeriksaanSelesai ? new Date(kunjungan.waktuPemeriksaanSelesai).toISOString() : undefined
+        }
+      }] : []),
+      ...(encounterStatus === "finished" ? [{
+        status: "finished",
+        period: {
+          start: periodEnd,
+          end: periodEnd
+        }
+      }] : [])
+    ],
+    hospitalization: dischargeDisp ? { dischargeDisposition: dischargeDisp } : undefined
+  };
+
+  if (dokterTujuan) {
+    encounterResource.participant = [
+      {
+        type: [
+          {
+            coding: [
+              {
+                system: "http://terminology.hl7.org/CodeSystem/v3-ParticipationType",
+                code: "PPRF",
+                display: "primary performer"
+              }
+            ]
+          }
+        ],
+        individual: {
+          reference: `Practitioner/${dokterTujuan.username}`,
+          display: dokterTujuan.namaLengkap || dokterTujuan.username
+        }
+      }
+    ];
+  }
+  bundle.entry.push({ resource: encounterResource });
+
+  // 3. Observation Resource (Vital Signs dari Screening)
+  if (screening) {
+    const observationComponents = [];
+    
+    if (screening.tekananDarahSistolik !== null && screening.tekananDarahDiastolik !== null) {
+      observationComponents.push(
+        {
+          code: {
+            coding: [
+              {
+                system: "http://loinc.org",
+                code: "8480-6",
+                display: "Systolic blood pressure"
+              }
+            ]
+          },
+          valueQuantity: {
+            value: screening.tekananDarahSistolik,
+            unit: "mmHg",
+            system: "http://unitsofmeasure.org",
+            code: "mm[Hg]"
+          }
+        },
+        {
+          code: {
+            coding: [
+              {
+                system: "http://loinc.org",
+                code: "8462-4",
+                display: "Diastolic blood pressure"
+              }
+            ]
+          },
+          valueQuantity: {
+            value: screening.tekananDarahDiastolik,
+            unit: "mmHg",
+            system: "http://unitsofmeasure.org",
+            code: "mm[Hg]"
+          }
+        }
+      );
+    }
+
+    if (screening.suhuTubuh !== null) {
+      observationComponents.push({
+        code: {
+          coding: [
+            {
+              system: "http://loinc.org",
+              code: "8310-5",
+              display: "Body temperature"
+            }
+          ]
+        },
+        valueQuantity: {
+          value: screening.suhuTubuh,
+          unit: "C",
+          system: "http://unitsofmeasure.org",
+          code: "Cel"
+        }
+      });
+    }
+
+    if (screening.nadi !== null) {
+      observationComponents.push({
+        code: {
+          coding: [
+            {
+              system: "http://loinc.org",
+              code: "8867-4",
+              display: "Heart rate"
+            }
+          ]
+        },
+        valueQuantity: {
+          value: screening.nadi,
+          unit: "beats/minute",
+          system: "http://unitsofmeasure.org",
+          code: "/min"
+        }
+      });
+    }
+
+    if (screening.frekuensiNapas !== null) {
+      observationComponents.push({
+        code: {
+          coding: [
+            {
+              system: "http://loinc.org",
+              code: "9279-1",
+              display: "Respiratory rate"
+            }
+          ]
+        },
+        valueQuantity: {
+          value: screening.frekuensiNapas,
+          unit: "breaths/minute",
+          system: "http://unitsofmeasure.org",
+          code: "/min"
+        }
+      });
+    }
+
+    if (observationComponents.length > 0) {
+      const observationResource = {
+        resourceType: "Observation",
+        id: `obs-${screening.id}`,
+        status: "final",
+        category: [
+          {
+            coding: [
+              {
+                system: "http://terminology.hl7.org/CodeSystem/observation-category",
+                code: "vital-signs",
+                display: "Vital Signs"
+              }
+            ]
+          }
+        ],
+        code: {
+          coding: [
+            {
+              system: "http://loinc.org",
+              code: "85354-9",
+              display: "Blood pressure panel with all children optional"
+            }
+          ]
+        },
+        subject: {
+          reference: `Patient/${pasien.noIHS || pasien.id}`,
+          display: pasien.namaLengkap
+        },
+        encounter: {
+          reference: `Encounter/${kunjungan.satusehatId || kunjungan.id}`
+        },
+        effectiveDateTime: new Date(screening.tanggalScreening).toISOString(),
+        component: observationComponents
+      };
+      bundle.entry.push({ resource: observationResource });
+    }
+  }
+
+  // 4. Condition Resource (Diagnosa ICD-10)
+  if (diagnosis && diagnosis.length > 0) {
+    for (const d of diagnosis) {
+      if (d.icd10) {
+        const conditionResource = {
+          resourceType: "Condition",
+          id: d.satusehatId || `cond-${d.id}`,
+          clinicalStatus: {
+            coding: [
+              {
+                system: "http://terminology.hl7.org/CodeSystem/condition-clinical",
+                code: d.statusKlinis?.toLowerCase() === 'sembuh' ? 'resolved' : 'active'
+              }
+            ]
+          },
+          verificationStatus: {
+            coding: [
+              {
+                system: "http://terminology.hl7.org/CodeSystem/condition-ver-status",
+                code: d.statusDiagnosis?.toLowerCase() === 'suspek' ? 'provisional' : 'confirmed'
+              }
+            ]
+          },
+          category: [
+            {
+              coding: [
+                {
+                  system: "http://terminology.hl7.org/CodeSystem/condition-category",
+                  code: "encounter-diagnosis",
+                  display: "Encounter Diagnosis"
+                }
+              ]
+            }
+          ],
+          code: {
+            coding: [
+              {
+                system: "http://hl7.org/fhir/sid/icd-10",
+                code: d.icd10.kode_icd10,
+                display: d.icd10.nama_diagnosis
+              }
+            ]
+          },
+          subject: {
+            reference: `Patient/${pasien.noIHS || pasien.id}`,
+            display: pasien.namaLengkap
+          },
+          encounter: {
+            reference: `Encounter/${kunjungan.satusehatId || kunjungan.id}`
+          }
+        };
+        bundle.entry.push({ resource: conditionResource });
+      }
+    }
+  }
+
+  // 5. Procedure Resource (Tindakan ICD-9-CM)
+  if (tindakans && tindakans.length > 0) {
+    for (const t of tindakans) {
+      if (t.icd9) {
+        const procedureResource = {
+          resourceType: "Procedure",
+          id: t.satusehatId || `proc-${t.id}`,
+          status: "completed",
+          code: {
+            coding: [
+              {
+                system: "http://hl7.org/fhir/sid/icd-9",
+                code: t.icd9.kode_icd9,
+                display: t.icd9.nama_prosedur
+              }
+            ]
+          },
+          subject: {
+            reference: `Patient/${pasien.noIHS || pasien.id}`,
+            display: pasien.namaLengkap
+          },
+          encounter: {
+            reference: `Encounter/${kunjungan.satusehatId || kunjungan.id}`
+          },
+          performedDateTime: new Date(t.waktuTindakan).toISOString()
+        };
+        bundle.entry.push({ resource: procedureResource });
+      }
+    }
+  }
+
+  // 6. MedicationRequest Resource (Resep Obat)
+  if (resep && resep.length > 0) {
+    for (const r of resep) {
+      if (r.details) {
+        for (const detail of r.details) {
+          if (detail.obat) {
+            const medicationRequestResource = {
+              resourceType: "MedicationRequest",
+              id: `medreq-${detail.id}`,
+              status: r.status === 'SELESAI' ? 'completed' : 'active',
+              intent: "order",
+              medicationCodeableConcept: {
+                coding: [
+                  {
+                    system: "https://fhir.kemkes.go.id/id/kfa",
+                    code: detail.obat.kodeObat,
+                    display: detail.obat.namaObat
+                  }
+                ]
+              },
+              subject: {
+                reference: `Patient/${pasien.noIHS || pasien.id}`,
+                display: pasien.namaLengkap
+              },
+              encounter: {
+                reference: `Encounter/${kunjungan.satusehatId || kunjungan.id}`
+              },
+              authoredOn: new Date(r.tanggalResep).toISOString(),
+              dosageInstruction: [
+                {
+                  text: detail.aturanPakai,
+                  additionalInstruction: detail.catatan ? [
+                    {
+                      text: detail.catatan
+                    }
+                  ] : undefined
+                }
+              ],
+              dispenseRequest: {
+                quantity: {
+                  value: detail.jumlah,
+                  unit: detail.obat.sediaan || "Pcs"
+                }
+              }
+            };
+            bundle.entry.push({ resource: medicationRequestResource });
+          }
+        }
+      }
+    }
+  }
+
+  // 7. CarePlan Resource (Plan & Rencana Terapi / Instruksi Medis Dokter)
+  if (rekamMedis && (rekamMedis.rencanaTerapi || rekamMedis.instruksiMedis)) {
+    const carePlanResource = {
+      resourceType: "CarePlan",
+      id: `cp-${rekamMedis.id}`,
+      status: "active",
+      intent: "plan",
+      category: [
+        {
+          coding: [
+            {
+              system: "http://terminology.hl7.org/CodeSystem/care-plan-category",
+              code: "assess-plan",
+              display: "Assessment and Plan of Care"
+            }
+          ]
+        }
+      ],
+      subject: {
+        reference: `Patient/${pasien.noIHS || pasien.id}`,
+        display: pasien.namaLengkap
+      },
+      encounter: {
+        reference: `Encounter/${kunjungan.satusehatId || kunjungan.id}`
+      },
+      description: [rekamMedis.rencanaTerapi, rekamMedis.instruksiMedis].filter(Boolean).join('\n')
+    };
+    bundle.entry.push({ resource: carePlanResource });
+  }
+
+  // 8. ServiceRequest Resource (Rujukan Keluar RS)
+  if (rujukanKeluar) {
+    const serviceRequestResource = {
+      resourceType: "ServiceRequest",
+      id: `sr-rujuk-${rujukanKeluar.id}`,
+      status: "active",
+      intent: "order",
+      category: [
+        {
+          coding: [
+            {
+              system: "http://snomed.info/sct",
+              code: "3457005",
+              display: "Patient referral"
+            }
+          ]
+        }
+      ],
+      subject: {
+        reference: `Patient/${pasien.noIHS || pasien.id}`,
+        display: pasien.namaLengkap
+      },
+      encounter: {
+        reference: `Encounter/${kunjungan.satusehatId || kunjungan.id}`
+      },
+      authoredOn: new Date(rujukanKeluar.tanggalRujukan).toISOString(),
+      reasonCode: [
+        {
+          text: rujukanKeluar.alasanRujukan
+        }
+      ],
+      performer: [
+        {
+          display: `${rujukanKeluar.faskesTujuan} - Poli ${rujukanKeluar.poliTujuan}`
+        }
+      ]
+    };
+    bundle.entry.push({ resource: serviceRequestResource });
+  }
+
+  // 9. DiagnosticReport & Observation Resource (Hasil Laboratorium)
+  if (orderLab && orderLab.details && orderLab.details.length > 0) {
+    const labObsResult = [];
+    for (const d of orderLab.details) {
+      const obsLab = {
+        resourceType: "Observation",
+        id: `obs-lab-${d.id}`,
+        status: "final",
+        category: [
+          {
+            coding: [
+              {
+                system: "http://terminology.hl7.org/CodeSystem/observation-category",
+                code: "laboratory",
+                display: "Laboratory"
+              }
+            ]
+          }
+        ],
+        code: {
+          text: d.parameter
+        },
+        subject: {
+          reference: `Patient/${pasien.noIHS || pasien.id}`,
+          display: pasien.namaLengkap
+        },
+        encounter: {
+          reference: `Encounter/${kunjungan.satusehatId || kunjungan.id}`
+        },
+        valueString: d.hasil || undefined,
+        referenceRange: d.nilaiRujukan ? [{ text: d.nilaiRujukan }] : undefined
+      };
+      bundle.entry.push({ resource: obsLab });
+      labObsResult.push({ reference: `Observation/obs-lab-${d.id}` });
+    }
+
+    const diagnosticReportResource = {
+      resourceType: "DiagnosticReport",
+      id: `diag-lab-${orderLab.id}`,
+      status: orderLab.status === 'SELESAI' ? 'final' : 'registered',
+      category: [
+        {
+          coding: [
+            {
+              system: "http://terminology.hl7.org/CodeSystem/v2-0074",
+              code: "LAB",
+              display: "Laboratory"
+            }
+          ]
+        }
+      ],
+      code: {
+        text: "Pemeriksaan Laboratorium Routine"
+      },
+      subject: {
+        reference: `Patient/${pasien.noIHS || pasien.id}`,
+        display: pasien.namaLengkap
+      },
+      encounter: {
+        reference: `Encounter/${kunjungan.satusehatId || kunjungan.id}`
+      },
+      effectiveDateTime: new Date(orderLab.tanggalOrder).toISOString(),
+      result: labObsResult,
+      conclusion: orderLab.catatanKlinis || undefined
+    };
+    bundle.entry.push({ resource: diagnosticReportResource });
+  }
+
+  return bundle;
+};
 
 module.exports = {
   getKunjunganScreening,
@@ -404,4 +1042,5 @@ module.exports = {
   getDashboardStats,
   getPerawatDashboardStats,
   getDokterDashboardStats,
+  getKunjunganFhirPreview,
 };

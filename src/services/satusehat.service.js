@@ -145,6 +145,38 @@ const createEncounter = async (data) => {
 };
 
 /**
+ * Update Encounter in SATUSEHAT (PUT /Encounter/{encounterId})
+ * @param {string} encounterId - SATUSEHAT Encounter ID
+ * @param {Object} data - Data Kunjungan, Pasien, Dokter, Poliklinik, Status (arrived/in-progress/finished)
+ */
+const updateEncounter = async (encounterId, data) => {
+  try {
+    const fhirClient = await createFhirClient();
+    const orgId = satusehatConfig.SATUSEHAT_ORG_ID;
+    
+    if (!orgId) {
+      throw new Error('SATUSEHAT_ORG_ID belum dikonfigurasi di file .env');
+    }
+
+    const payload = buildEncounterPayload(data, orgId);
+    payload.id = encounterId;
+
+    console.log(`[SATUSEHAT] Updating Encounter ${encounterId} Payload:`, JSON.stringify(payload, null, 2));
+
+    const response = await fhirClient.put(`/Encounter/${encounterId}`, payload);
+    
+    return {
+      success: true,
+      data: response.data,
+      encounterId: response.data.id
+    };
+  } catch (error) {
+    console.error(`[SATUSEHAT] Error updating encounter ${encounterId}:`, error.response?.data ? JSON.stringify(error.response?.data, null, 2) : error.message);
+    throw new Error(error.response?.data?.issue?.[0]?.diagnostics || 'Terjadi kesalahan saat memperbarui Encounter di SATUSEHAT');
+  }
+};
+
+/**
  * Mengirim Diagnosa (Condition) ke SATUSEHAT
  * @param {Object} data - payload (pasienIhs, pasienName, dokterIhs, dokterName, encounterId, kodeIcd10, namaDiagnosis, statusDiagnosis)
  */
@@ -385,6 +417,7 @@ module.exports = {
   getPractitionerByNIK,
   createLocation,
   createEncounter,
+  updateEncounter,
   createObservation,
   createCondition,
   createPrescription,

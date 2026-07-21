@@ -199,6 +199,9 @@ model Kunjungan {
   satusehatSync     Json?       // Tracking sinkronisasi SATUSEHAT
   
   statusKunjungan   String      @default("MENUNGGU") // MENUNGGU, DIPERIKSA, SELESAI, BATAL dll
+  statusPulang      String?     // PULANG_SEMBUH, DIRUJUK_RS, RAWAT_INAP, KONTROL_ULANG (FHIR Discharge Disposition)
+  waktuPemeriksaanMulai DateTime?
+  waktuPemeriksaanSelesai DateTime?
   
   // Relasi Ke Petugas (User)
   userPendaftarId   String?
