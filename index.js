@@ -1,4 +1,5 @@
 require('dotenv').config();
+require('./src/workers/satusehat.worker'); // Initialize SATUSEHAT Background Worker Listener
 const app = require('./src/app');
 
 const PORT = process.env.PORT || 5000;

@@ -4,6 +4,7 @@ const { buildConditionPayload } = require('./condition.mapper');
 const { buildObservationPayload } = require('./observation.mapper');
 const { buildProcedurePayload } = require('./procedure.mapper');
 const { buildMedicationPayload, buildMedicationRequestPayload } = require('./medication.mapper');
+const { buildCompositionPayload } = require('./composition.mapper');
 
 /**
  * Helper to ensure standard reference string
@@ -31,6 +32,10 @@ const toRawatJalanBundle = (dataComplete = {}, orgId) => {
   const encounterRef = satusehatEncounterId ? `Encounter/${satusehatEncounterId}` : encounterUuid;
 
   const entries = [];
+  const obsUuids = [];
+  const condUuids = [];
+  const procUuids = [];
+  const medReqUuids = [];
 
   // 1. ENCOUNTER
   const encounterData = {
@@ -93,6 +98,7 @@ const toRawatJalanBundle = (dataComplete = {}, orgId) => {
         url: "Observation"
       }
     });
+    obsUuids.push(obsUuid);
   });
 
   // 3. CONDITIONS (Diagnosis ICD-10)
@@ -122,6 +128,7 @@ const toRawatJalanBundle = (dataComplete = {}, orgId) => {
         url: "Condition"
       }
     });
+    condUuids.push(condUuid);
   });
 
   // 4. PROCEDURES (Tindakan ICD-9)
@@ -151,15 +158,22 @@ const toRawatJalanBundle = (dataComplete = {}, orgId) => {
         url: "Procedure"
       }
     });
+    procUuids.push(procUuid);
   });
 
   // 5. MEDICATIONS & MEDICATION REQUESTS (Resep Obat)
   const resepDetails = dataComplete.resepDetails || dataComplete.resep || dataComplete.medications || [];
   resepDetails.forEach((med) => {
-    const medUuid = `urn:uuid:${randomUUID()}`;
-    const medReqUuid = `urn:uuid:${randomUUID()}`;
     const kfaCode = med.kfa_code || med.kodeObat || med.obat?.kfa_code || med.obat?.kodeObat;
     const namaObat = med.namaObat || med.obat?.namaObat;
+
+    if (!kfaCode) {
+      console.warn(`[FHIR Mapper] Skipping medication entry for "${namaObat || med.id}": missing valid KFA/obat code.`);
+      return;
+    }
+
+    const medUuid = `urn:uuid:${randomUUID()}`;
+    const medReqUuid = `urn:uuid:${randomUUID()}`;
 
     // Medication Resource
     const medPayload = buildMedicationPayload({
@@ -205,6 +219,138 @@ const toRawatJalanBundle = (dataComplete = {}, orgId) => {
         url: "MedicationRequest"
       }
     });
+    medReqUuids.push(medReqUuid);
+  });
+
+  // 6. COMPOSITION (Resume Medis)
+  const compositionUuid = `urn:uuid:${randomUUID()}`;
+  const compositionPayload = buildCompositionPayload({
+    resumeMedisId: dataComplete.rekamMedis?.id || dataComplete.id,
+    id: dataComplete.id,
+    status: "final",
+    pasienIhs,
+    pasienName,
+    encounterId: satusehatEncounterId || encounterUuid.replace('urn:uuid:', ''),
+    dokterIhs,
+    dokterName,
+    title: "Resume Medis Rawat Jalan",
+    ringkasanKlinis: dataComplete.rekamMedis?.keluhanUtama || dataComplete.rekamMedis?.diagnosisKlinis || "Pemeriksaan Rawat Jalan",
+    instruksiTindakLanjut: dataComplete.rekamMedis?.instruksiMedis || dataComplete.rekamMedis?.rencanaTerapi || "Kontrol bila keluhan berlanjut"
+  }, organizationId);
+
+  compositionPayload.encounter = { reference: encounterRef };
+  if (pasienIhs) compositionPayload.subject = { reference: formatRef('Patient', pasienIhs), display: pasienName };
+  if (dokterIhs) compositionPayload.author = [{ reference: formatRef('Practitioner', dokterIhs), display: dokterName }];
+
+  const compositionSections = [
+    {
+      title: "Riwayat Keluhan & Ringkasan Klinis",
+      code: {
+        coding: [
+          {
+            system: "http://loinc.org",
+            code: "11329-0",
+            display: "History of General health Narrative"
+          }
+        ]
+      },
+      text: {
+        status: "generated",
+        div: `<div xmlns="http://www.w3.org/1999/xhtml">${dataComplete.rekamMedis?.keluhanUtama || "Tidak ada ringkasan"}</div>`
+      }
+    }
+  ];
+
+  if (condUuids.length > 0) {
+    compositionSections.push({
+      title: "Diagnosis",
+      code: {
+        coding: [
+          {
+            system: "http://loinc.org",
+            code: "29548-5",
+            display: "Diagnosis"
+          }
+        ]
+      },
+      entry: condUuids.map(uuid => ({ reference: uuid }))
+    });
+  }
+
+  if (obsUuids.length > 0) {
+    compositionSections.push({
+      title: "Pemeriksaan Fisik & Tanda Vital",
+      code: {
+        coding: [
+          {
+            system: "http://loinc.org",
+            code: "8716-3",
+            display: "Vital signs"
+          }
+        ]
+      },
+      entry: obsUuids.map(uuid => ({ reference: uuid }))
+    });
+  }
+
+  if (procUuids.length > 0) {
+    compositionSections.push({
+      title: "Tindakan Medis",
+      code: {
+        coding: [
+          {
+            system: "http://loinc.org",
+            code: "18776-5",
+            display: "Plan of care note"
+          }
+        ]
+      },
+      entry: procUuids.map(uuid => ({ reference: uuid }))
+    });
+  }
+
+  if (medReqUuids.length > 0) {
+    compositionSections.push({
+      title: "Resep Obat",
+      code: {
+        coding: [
+          {
+            system: "http://loinc.org",
+            code: "29551-9",
+            display: "Medication prescribed"
+          }
+        ]
+      },
+      entry: medReqUuids.map(uuid => ({ reference: uuid }))
+    });
+  }
+
+  compositionSections.push({
+    title: "Instruksi Tindak Lanjut",
+    code: {
+      coding: [
+        {
+          system: "http://loinc.org",
+          code: "28574-2",
+          display: "Discharge instructions instructions"
+        }
+      ]
+    },
+    text: {
+      status: "generated",
+      div: `<div xmlns="http://www.w3.org/1999/xhtml">${dataComplete.rekamMedis?.instruksiMedis || dataComplete.rekamMedis?.rencanaTerapi || "Kontrol sesuai petunjuk dokter"}</div>`
+    }
+  });
+
+  compositionPayload.section = compositionSections;
+
+  entries.push({
+    fullUrl: compositionUuid,
+    resource: compositionPayload,
+    request: {
+      method: "POST",
+      url: "Composition"
+    }
   });
 
   return {
