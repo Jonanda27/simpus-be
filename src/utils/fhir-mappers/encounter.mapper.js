@@ -10,14 +10,10 @@ const formatReference = (prefix, id) => {
 };
 
 const buildEncounterPayload = (data, orgId) => {
-<<<<<<< HEAD
-  const startEncounter = data.waktuRegistrasi || data.waktuPemeriksaanMulai || new Date().toISOString();
-  const endEncounter = data.waktuPemeriksaanSelesai || (data.status === 'finished' ? new Date().toISOString() : undefined);
-=======
   // Use actual registration timestamp (ISO-8601 UTC)
   const startEncounter = data.tanggalRegistrasi 
     ? new Date(data.tanggalRegistrasi).toISOString() 
-    : new Date().toISOString();
+    : (data.waktuRegistrasi || data.waktuPemeriksaanMulai || new Date().toISOString());
 
   // Dynamic status mapping
   const statusMap = {
@@ -30,8 +26,7 @@ const buildEncounterPayload = (data, orgId) => {
 
   const endEncounter = data.waktuDischarge 
     ? new Date(data.waktuDischarge).toISOString() 
-    : (fhirStatus === 'finished' ? new Date().toISOString() : undefined);
->>>>>>> 1f3cd31ad4b22d640644e62b13afc863e70fd8fc
+    : (data.waktuPemeriksaanSelesai || (fhirStatus === 'finished' ? new Date().toISOString() : undefined));
 
   // Map Jenis Pelayanan lokal ke FHIR Class
   let classCode = "AMB"; // Default Ambulatory (Rawat Jalan)
@@ -48,17 +43,9 @@ const buildEncounterPayload = (data, orgId) => {
     }
   }
 
-<<<<<<< HEAD
-  const status = data.status || "arrived";
-
-  const payload = {
-    resourceType: "Encounter",
-    status: status,
-=======
   const payload = {
     resourceType: "Encounter",
     status: fhirStatus,
->>>>>>> 1f3cd31ad4b22d640644e62b13afc863e70fd8fc
     class: {
       system: "http://terminology.hl7.org/CodeSystem/v3-ActCode",
       code: classCode,
@@ -100,32 +87,24 @@ const buildEncounterPayload = (data, orgId) => {
     ],
     period: {
       start: startEncounter,
-<<<<<<< HEAD
-      end: endEncounter
-=======
       ...(endEncounter && { end: endEncounter })
->>>>>>> 1f3cd31ad4b22d640644e62b13afc863e70fd8fc
     },
     statusHistory: [
       {
         status: fhirStatus,
         period: {
           start: startEncounter,
-<<<<<<< HEAD
-          end: data.waktuPemeriksaanMulai || startEncounter
-=======
           ...(endEncounter && { end: endEncounter })
->>>>>>> 1f3cd31ad4b22d640644e62b13afc863e70fd8fc
         }
       },
       ...(data.waktuPemeriksaanMulai ? [{
         status: "in-progress",
         period: {
-          start: data.waktuPemeriksaanMulai,
+          start: new Date(data.waktuPemeriksaanMulai).toISOString(),
           end: endEncounter
         }
       }] : []),
-      ...(status === 'finished' ? [{
+      ...(fhirStatus === 'finished' ? [{
         status: "finished",
         period: {
           start: endEncounter,
@@ -138,7 +117,30 @@ const buildEncounterPayload = (data, orgId) => {
         location: {
           reference: formatReference("Location", data.poliIhs),
           display: data.poliName
-        }
+        },
+        extension: [
+          {
+            url: "https://fhir.kemkes.go.id/r4/StructureDefinition/ServiceClass",
+            valueCodeableConcept: {
+              coding: [
+                {
+                  system: "http://terminology.kemkes.go.id/CodeSystem/locationServiceClass-Outpatient",
+                  code: data.kelasPoliCode || "reguler",
+                  display: data.kelasPoliDisplay || "Kelas Reguler"
+                }
+              ]
+            },
+            upgradeClassIndicator: {
+              coding: [
+                {
+                  system: "http://terminology.kemkes.go.id/CodeSystem/locationUpgradeClass",
+                  code: data.upgradeClassCode || "kelas-tetap",
+                  display: data.upgradeClassDisplay || "Kelas Tetap Perawatan"
+                }
+              ]
+            }
+          }
+        ]
       }
     ],
     serviceProvider: {
@@ -152,19 +154,6 @@ const buildEncounterPayload = (data, orgId) => {
     ]
   };
 
-<<<<<<< HEAD
-  if (data.statusPulang) {
-    let dischargeCode = "home";
-    let dischargeDisplay = "Home";
-    if (data.statusPulang === 'DIRUJUK_RS') {
-      dischargeCode = "oth";
-      dischargeDisplay = "Referred to external facility / Hospital";
-    } else if (data.statusPulang === 'RAWAT_INAP') {
-      dischargeCode = "hosp";
-      dischargeDisplay = "Admitted to inpatient ward";
-    }
-
-=======
   // Diagnosis reference mapping if condition ID exists
   if (data.conditionSatusehatId) {
     payload.diagnosis = [
@@ -187,25 +176,29 @@ const buildEncounterPayload = (data, orgId) => {
   }
 
   // Hospitalization / Discharge Disposition
-  if (data.caraKeluar || data.kondisiDischarge || fhirStatus === 'finished') {
->>>>>>> 1f3cd31ad4b22d640644e62b13afc863e70fd8fc
+  const statusPulang = data.statusPulang || data.caraKeluar;
+  if (statusPulang || data.kondisiDischarge || fhirStatus === 'finished') {
+    let dischargeCode = "home";
+    let dischargeDisplay = data.kondisiDischarge || "Home";
+
+    if (statusPulang === 'DIRUJUK_RS' || statusPulang === 'RUJUK') {
+      dischargeCode = "oth";
+      dischargeDisplay = "Referred to external facility / Hospital";
+    } else if (statusPulang === 'RAWAT_INAP') {
+      dischargeCode = "hosp";
+      dischargeDisplay = "Admitted to inpatient ward";
+    }
+
     payload.hospitalization = {
       dischargeDisposition: {
         coding: [
           {
             system: "http://terminology.hl7.org/CodeSystem/discharge-disposition",
-<<<<<<< HEAD
             code: dischargeCode,
             display: dischargeDisplay
           }
         ],
-        text: data.statusPulang
-=======
-            code: data.caraKeluar === 'RUJUK' ? 'other-hcf' : 'home',
-            display: data.kondisiDischarge || 'Discharged to home'
-          }
-        ]
->>>>>>> 1f3cd31ad4b22d640644e62b13afc863e70fd8fc
+        text: statusPulang
       }
     };
   }
