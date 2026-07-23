@@ -3,6 +3,7 @@
 
 --- FILE: index.js ---
 require('dotenv').config();
+require('./src/workers/satusehat.worker');
 const app = require('./src/app');
 
 const PORT = process.env.PORT || 5000;
@@ -29,10 +30,12 @@ app.listen(PORT, () => {
     "@prisma/client": "^5.22.0",
     "axios": "^1.18.1",
     "bcryptjs": "^3.0.3",
+    "bullmq": "^5.80.11",
     "cloudinary": "^2.10.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "ioredis": "^5.11.1",
     "jsonwebtoken": "^9.0.3",
     "lz-string": "^1.5.0",
     "multer": "^2.2.0"
@@ -2223,17 +2226,17 @@ const prisma = new PrismaClient();
 
 async function main() {
   const data = [
-    { kodeObat: 'OBT-001', namaObat: 'Paracetamol 500mg', kategori: 'Obat Bebas', sediaan: 'Tablet', harga: 5000, stok: 150 },
-    { kodeObat: 'OBT-002', namaObat: 'Amoxicillin 500mg', kategori: 'Obat Keras', sediaan: 'Kapsul', harga: 12000, stok: 100 },
-    { kodeObat: 'OBT-003', namaObat: 'Ibuprofen 400mg', kategori: 'Obat Bebas Terbatas', sediaan: 'Tablet', harga: 8000, stok: 200 },
-    { kodeObat: 'OBT-004', namaObat: 'Cetirizine 10mg', kategori: 'Obat Bebas Terbatas', sediaan: 'Tablet', harga: 6000, stok: 120 },
-    { kodeObat: 'OBT-005', namaObat: 'Antasida Doen', kategori: 'Obat Bebas', sediaan: 'Tablet Kunyah', harga: 3000, stok: 300 }
+    { kodeObat: 'OBT-001', namaObat: 'Paracetamol 500mg', kategori: 'Obat Bebas', sediaan: 'Tablet', harga: 5000, stok: 150, kfa_code: '93001234' },
+    { kodeObat: 'OBT-002', namaObat: 'Amoxicillin 500mg', kategori: 'Obat Keras', sediaan: 'Kapsul', harga: 12000, stok: 100, kfa_code: '93001235' },
+    { kodeObat: 'OBT-003', namaObat: 'Ibuprofen 400mg', kategori: 'Obat Bebas Terbatas', sediaan: 'Tablet', harga: 8000, stok: 200, kfa_code: '93001236' },
+    { kodeObat: 'OBT-004', namaObat: 'Cetirizine 10mg', kategori: 'Obat Bebas Terbatas', sediaan: 'Tablet', harga: 6000, stok: 120, kfa_code: '93001237' },
+    { kodeObat: 'OBT-005', namaObat: 'Antasida Doen', kategori: 'Obat Bebas', sediaan: 'Tablet Kunyah', harga: 3000, stok: 300, kfa_code: '93001238' }
   ];
 
   for (const item of data) {
     await prisma.masterObat.upsert({
       where: { kodeObat: item.kodeObat },
-      update: {},
+      update: { kfa_code: item.kfa_code },
       create: item,
     });
   }
@@ -2321,6 +2324,16 @@ const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 
 module.exports = prisma;
+
+--- FILE: src\config\redis.js ---
+const redisConnection = {
+  host: process.env.REDIS_HOST || '127.0.0.1',
+  port: parseInt(process.env.REDIS_PORT || '6379', 10),
+  password: process.env.REDIS_PASSWORD || undefined,
+  maxRetriesPerRequest: null,
+};
+
+module.exports = redisConnection;
 
 --- FILE: src\config\satusehat.js ---
 require('dotenv').config();
@@ -4834,6 +4847,35 @@ const uploadImage = multer({
 module.exports = {
   uploadPks,
   uploadImage
+};
+
+--- FILE: src\queues\satusehat.queue.js ---
+const { Queue } = require('bullmq');
+const redisConnection = require('../config/redis');
+
+const satusehatQueue = new Queue('satusehat-sync', {
+  connection: redisConnection
+});
+
+const addSatusehatSyncJob = async (kunjunganId) => {
+  return await satusehatQueue.add(
+    'sync-visit-bundle',
+    { kunjunganId },
+    {
+      attempts: 3,
+      backoff: {
+        type: 'exponential',
+        delay: 60000
+      },
+      removeOnComplete: 100,
+      removeOnFail: 500
+    }
+  );
+};
+
+module.exports = {
+  satusehatQueue,
+  addSatusehatSyncJob
 };
 
 --- FILE: src\routes\auth.routes.js ---
@@ -7366,6 +7408,7 @@ const ukmService = require('./ukm.service');
 const satusehatService = require('./satusehat.service');
 const SatuSehatGateway = require('./satusehat/gateway.service');
 const { toRawatJalanBundle } = require('../utils/fhir-mappers');
+const { addSatusehatSyncJob } = require('../queues/satusehat.queue');
 
 const extractObservationsFromScreening = (screening) => {
   if (!screening) return [];
@@ -7710,50 +7753,13 @@ const simpanDiagnosa = async (kunjunganId, user, diagnosaArr) => {
     })),
   });
 
-  let conditionCount = 0;
-
   for (const d of diagnosaArr) {
     if (d.icd10Id) {
       const icd10 = await prisma.masterICD10.findUnique({ where: { id_icd10: d.icd10Id } });
-
       if (icd10 && icd10.kode_icd10) {
-
         await ukmService.autoRegisterUKM(kunjungan.pasienId, icd10.kode_icd10);
-
-        const dokterTujuan = kunjungan.dokterTujuan;
-        if (kunjungan.encounterId && kunjungan.pasien?.noIHS && dokterTujuan?.tenagaMedis?.noIHS) {
-          try {
-            await satusehatService.createCondition({
-              pasienIhs: kunjungan.pasien.noIHS,
-              pasienName: kunjungan.pasien.namaLengkap,
-              dokterIhs: dokterTujuan.tenagaMedis.noIHS,
-              dokterName: dokterTujuan.namaLengkap,
-              encounterId: kunjungan.encounterId,
-              kodeIcd10: icd10.kode_icd10,
-              namaDiagnosis: icd10.nama_diagnosis,
-              statusDiagnosis: d.statusVerifikasi || 'Suspek',
-              statusKlinis: d.statusKlinis || 'Aktif'
-            });
-            conditionCount++;
-          } catch (err) {
-            console.error(`Error sync Condition SATUSEHAT untuk ICD ${icd10.kode_icd10}:`, err.message);
-          }
-        }
       }
     }
-  }
-
-  if (conditionCount > 0) {
-    const syncStatus = (typeof kunjungan.satusehatSync === 'object' && kunjungan.satusehatSync !== null)
-      ? { ...kunjungan.satusehatSync }
-      : {};
-
-    syncStatus.Condition = { status: 'SUCCESS', detail: `Sent ${conditionCount} diagnosis conditions` };
-
-    await prisma.kunjungan.update({
-      where: { id: kunjunganId },
-      data: { satusehatSync: syncStatus }
-    });
   }
 
   return created;
@@ -7788,50 +7794,6 @@ const simpanTindakan = async (kunjunganId, user, tindakanArr) => {
       catatanTindakan: t.catatan || null,
     })),
   });
-
-  let procedureCount = 0;
-  for (const t of tindakanArr) {
-    if (t.icd9Id) {
-      const icd9 = await prisma.masterICD9.findUnique({ where: { id_icd9: t.icd9Id } });
-
-      if (icd9 && icd9.kode_icd9) {
-
-        const dokterTujuan = kunjungan.dokterTujuan;
-
-        if (kunjungan.encounterId && kunjungan.pasien?.noIHS && dokterTujuan?.tenagaMedis?.noIHS) {
-          try {
-            await satusehatService.createProcedure({
-              pasienIhs: kunjungan.pasien.noIHS,
-              pasienName: kunjungan.pasien.namaLengkap,
-              dokterIhs: dokterTujuan.tenagaMedis.noIHS,
-              dokterName: dokterTujuan.namaLengkap,
-              encounterId: kunjungan.encounterId,
-              kodeIcd9: icd9.kode_icd9,
-              namaProsedur: icd9.nama_prosedur,
-              tindakanId: `${kunjunganId}-${icd9.id_icd9}`,
-              waktuTindakan: new Date().toISOString()
-            });
-            procedureCount++;
-          } catch (err) {
-            console.error(`Error sync Procedure SATUSEHAT untuk ICD-9 ${icd9.kode_icd9}:`, err.message);
-          }
-        }
-      }
-    }
-  }
-
-  if (procedureCount > 0) {
-    const syncStatus = (typeof kunjungan.satusehatSync === 'object' && kunjungan.satusehatSync !== null)
-      ? { ...kunjungan.satusehatSync }
-      : {};
-
-    syncStatus.Procedure = { status: 'SUCCESS', detail: `Sent ${procedureCount} procedures` };
-
-    await prisma.kunjungan.update({
-      where: { id: kunjunganId },
-      data: { satusehatSync: syncStatus }
-    });
-  }
 
   return created;
 };
@@ -7873,36 +7835,6 @@ const simpanAlergi = async (kunjunganId, alergiArr, user) => {
     include: { alergiMaster: true }
   });
 
-  if (user && user.role === 'DOKTER') {
-    const { createAllergyIntolerance } = require('./satusehat.service');
-    let syncLogs = kunjungan.satusehatSync || {};
-    if (typeof syncLogs !== 'object') syncLogs = {};
-    if (!syncLogs.allergy) syncLogs.allergy = [];
-
-    for (const alergi of insertedAlergis) {
-    if (kunjungan.encounterId && kunjungan.dokterTujuan?.tenagaMedis?.noIHS && kunjungan.pasien?.noIHS) {
-      try {
-        const res = await createAllergyIntolerance(kunjungan.pasien, kunjungan.dokterTujuan, kunjungan, alergi);
-        if (res.success) {
-          syncLogs.allergy.push({
-            idLokal: alergi.id,
-            allergyId: res.allergyId,
-            status: 'SUCCESS',
-            timestamp: new Date().toISOString()
-          });
-        }
-      } catch (error) {
-        console.error("Gagal sinkronisasi alergi ke SATUSEHAT:", error.message);
-      }
-    }
-  }
-
-    await prisma.kunjungan.update({
-      where: { id: kunjunganId },
-      data: { satusehatSync: syncLogs }
-    });
-  }
-
   return insertedAlergis;
 };
 
@@ -7923,7 +7855,8 @@ const selesaikanPemeriksaan = async (kunjunganId, user) => {
       where: { id: kunjunganId },
       data: {
         statusKunjungan: 'SELESAI',
-        waktuDischarge: new Date()
+        waktuDischarge: new Date(),
+        satusehat_sync_status: 'PENDING'
       },
     });
 
@@ -7934,79 +7867,12 @@ const selesaikanPemeriksaan = async (kunjunganId, user) => {
   let lastError = null;
 
   try {
-    const dataComplete = await prisma.kunjungan.findUnique({
-      where: { id: kunjunganId },
-      include: {
-        pasien: true,
-        poliklinik: true,
-        screening: true,
-        rekamMedis: true,
-        diagnosis: {
-          include: { icd10: true }
-        },
-        tindakans: {
-          include: { icd9: true }
-        },
-        resep: {
-          include: {
-            details: {
-              include: { obat: true }
-            }
-          }
-        },
-        dokterTujuan: {
-          include: { tenagaMedis: true }
-        }
-      }
-    });
-
-    if (dataComplete) {
-
-      const resepDetails = [];
-      if (Array.isArray(dataComplete.resep)) {
-        dataComplete.resep.forEach(r => {
-          if (Array.isArray(r.details)) {
-            r.details.forEach(d => resepDetails.push({ ...d, resepId: r.id }));
-          }
-        });
-      }
-
-      const observations = extractObservationsFromScreening(dataComplete.screening);
-
-      const completePayload = {
-        ...dataComplete,
-        observations,
-        resepDetails,
-        satusehat_encounter_id: dataComplete.satusehat_encounter_id || dataComplete.satusehatId || dataComplete.encounterId
-      };
-
-      const bundlePayload = toRawatJalanBundle(completePayload);
-
-      console.log(`[SATUSEHAT RawatJalan] Mengirim Bundle Transaction untuk kunjungan ${kunjunganId}...`);
-      const response = await SatuSehatGateway.sendBundleTransaction(bundlePayload);
-
-      syncStatus = 'SUCCESS';
-      lastError = null;
-
-      await prisma.kunjungan.update({
-        where: { id: kunjunganId },
-        data: {
-          satusehat_sync_status: 'SUCCESS',
-          satusehat_last_error: null,
-          satusehatSync: {
-            bundleTransaction: {
-              status: 'SUCCESS',
-              response,
-              timestamp: new Date().toISOString()
-            }
-          }
-        }
-      });
-    }
+    await addSatusehatSyncJob(kunjunganId);
+    console.log(`[SATUSEHAT RawatJalan] Job sinkronisasi kunjungan ${kunjunganId} berhasil didaftarkan ke Redis Queue.`);
   } catch (error) {
     syncStatus = 'FAILED';
     lastError = error.message || String(error);
-    console.error(`[SATUSEHAT RawatJalan] Gagal sync Bundle Transaction untuk kunjungan ${kunjunganId}:`, lastError);
+    console.error(`[Queue Error] Gagal mendaftarkan job SATUSEHAT untuk kunjungan ${kunjunganId}:`, lastError);
 
     try {
       await prisma.kunjungan.update({
@@ -8017,7 +7883,7 @@ const selesaikanPemeriksaan = async (kunjunganId, user) => {
         }
       });
     } catch (dbErr) {
-      console.error(`[DB Error] Gagal update satusehat_last_error:`, dbErr.message);
+      console.error(`[DB Error] Gagal update status error queue ke DB:`, dbErr.message);
     }
   }
 
@@ -8123,46 +7989,6 @@ const simpanResep = async (kunjunganId, user, resepArr) => {
 
     return { resep, details };
   });
-
-  let medCount = 0;
-  for (const det of result.details) {
-    const obat = await prisma.masterObat.findUnique({ where: { id: det.obatId } });
-    if (obat && obat.kodeObat && kunjungan.encounterId && kunjungan.pasien?.noIHS && kunjungan.dokterTujuan?.tenagaMedis?.noIHS) {
-      try {
-        await satusehatService.createPrescription({
-          pasienIhs: kunjungan.pasien.noIHS,
-          pasienName: kunjungan.pasien.namaLengkap,
-          dokterIhs: kunjungan.dokterTujuan.tenagaMedis.noIHS,
-          dokterName: kunjungan.dokterTujuan.namaLengkap,
-          encounterId: kunjungan.encounterId,
-          kodeObat: obat.kodeObat,
-          namaObat: obat.namaObat,
-          sediaan: obat.sediaan,
-          resepId: result.resep.id,
-          resepDetailId: `${result.resep.id}-${obat.id}`,
-          jumlah: det.jumlah,
-          aturanPakai: det.aturanPakai
-        });
-        medCount++;
-      } catch (err) {
-        console.error(`Error sync Prescription SATUSEHAT untuk Obat ${obat.kodeObat}:`, err.message);
-      }
-    }
-  }
-
-  if (medCount > 0) {
-    const syncStatus = (typeof kunjungan.satusehatSync === 'object' && kunjungan.satusehatSync !== null)
-      ? { ...kunjungan.satusehatSync }
-      : {};
-
-    syncStatus.Medication = { status: 'SUCCESS', detail: `Sent ${medCount} medications` };
-    syncStatus.MedicationRequest = { status: 'SUCCESS', detail: `Sent ${medCount} prescriptions` };
-
-    await prisma.kunjungan.update({
-      where: { id: kunjunganId },
-      data: { satusehatSync: syncStatus }
-    });
-  }
 
   return result.resep;
 };
@@ -10147,6 +9973,7 @@ const { buildConditionPayload } = require('./condition.mapper');
 const { buildObservationPayload } = require('./observation.mapper');
 const { buildProcedurePayload } = require('./procedure.mapper');
 const { buildMedicationPayload, buildMedicationRequestPayload } = require('./medication.mapper');
+const { buildCompositionPayload } = require('./composition.mapper');
 
 const formatRef = (resourceType, id) => {
   if (!id) return undefined;
@@ -10164,6 +9991,10 @@ const toRawatJalanBundle = (dataComplete = {}, orgId) => {
   const encounterRef = satusehatEncounterId ? `Encounter/${satusehatEncounterId}` : encounterUuid;
 
   const entries = [];
+  const obsUuids = [];
+  const condUuids = [];
+  const procUuids = [];
+  const medReqUuids = [];
 
   const encounterData = {
     ...dataComplete,
@@ -10224,6 +10055,7 @@ const toRawatJalanBundle = (dataComplete = {}, orgId) => {
         url: "Observation"
       }
     });
+    obsUuids.push(obsUuid);
   });
 
   const diagnosisList = dataComplete.diagnosisList || dataComplete.diagnoses || dataComplete.diagnosis || [];
@@ -10252,6 +10084,7 @@ const toRawatJalanBundle = (dataComplete = {}, orgId) => {
         url: "Condition"
       }
     });
+    condUuids.push(condUuid);
   });
 
   const procedureList = dataComplete.procedureList || dataComplete.procedures || dataComplete.tindakans || [];
@@ -10280,14 +10113,21 @@ const toRawatJalanBundle = (dataComplete = {}, orgId) => {
         url: "Procedure"
       }
     });
+    procUuids.push(procUuid);
   });
 
   const resepDetails = dataComplete.resepDetails || dataComplete.resep || dataComplete.medications || [];
   resepDetails.forEach((med) => {
-    const medUuid = `urn:uuid:${randomUUID()}`;
-    const medReqUuid = `urn:uuid:${randomUUID()}`;
     const kfaCode = med.kfa_code || med.kodeObat || med.obat?.kfa_code || med.obat?.kodeObat;
     const namaObat = med.namaObat || med.obat?.namaObat;
+
+    if (!kfaCode) {
+      console.warn(`[FHIR Mapper] Skipping medication entry for "${namaObat || med.id}": missing valid KFA/obat code.`);
+      return;
+    }
+
+    const medUuid = `urn:uuid:${randomUUID()}`;
+    const medReqUuid = `urn:uuid:${randomUUID()}`;
 
     const medPayload = buildMedicationPayload({
       ...med,
@@ -10331,6 +10171,137 @@ const toRawatJalanBundle = (dataComplete = {}, orgId) => {
         url: "MedicationRequest"
       }
     });
+    medReqUuids.push(medReqUuid);
+  });
+
+  const compositionUuid = `urn:uuid:${randomUUID()}`;
+  const compositionPayload = buildCompositionPayload({
+    resumeMedisId: dataComplete.rekamMedis?.id || dataComplete.id,
+    id: dataComplete.id,
+    status: "final",
+    pasienIhs,
+    pasienName,
+    encounterId: satusehatEncounterId || encounterUuid.replace('urn:uuid:', ''),
+    dokterIhs,
+    dokterName,
+    title: "Resume Medis Rawat Jalan",
+    ringkasanKlinis: dataComplete.rekamMedis?.keluhanUtama || dataComplete.rekamMedis?.diagnosisKlinis || "Pemeriksaan Rawat Jalan",
+    instruksiTindakLanjut: dataComplete.rekamMedis?.instruksiMedis || dataComplete.rekamMedis?.rencanaTerapi || "Kontrol bila keluhan berlanjut"
+  }, organizationId);
+
+  compositionPayload.encounter = { reference: encounterRef };
+  if (pasienIhs) compositionPayload.subject = { reference: formatRef('Patient', pasienIhs), display: pasienName };
+  if (dokterIhs) compositionPayload.author = [{ reference: formatRef('Practitioner', dokterIhs), display: dokterName }];
+
+  const compositionSections = [
+    {
+      title: "Riwayat Keluhan & Ringkasan Klinis",
+      code: {
+        coding: [
+          {
+            system: "http://loinc.org",
+            code: "11329-0",
+            display: "History of General health Narrative"
+          }
+        ]
+      },
+      text: {
+        status: "generated",
+        div: `<div xmlns="http://www.w3.org/1999/xhtml">${dataComplete.rekamMedis?.keluhanUtama || "Tidak ada ringkasan"}</div>`
+      }
+    }
+  ];
+
+  if (condUuids.length > 0) {
+    compositionSections.push({
+      title: "Diagnosis",
+      code: {
+        coding: [
+          {
+            system: "http://loinc.org",
+            code: "29548-5",
+            display: "Diagnosis"
+          }
+        ]
+      },
+      entry: condUuids.map(uuid => ({ reference: uuid }))
+    });
+  }
+
+  if (obsUuids.length > 0) {
+    compositionSections.push({
+      title: "Pemeriksaan Fisik & Tanda Vital",
+      code: {
+        coding: [
+          {
+            system: "http://loinc.org",
+            code: "8716-3",
+            display: "Vital signs"
+          }
+        ]
+      },
+      entry: obsUuids.map(uuid => ({ reference: uuid }))
+    });
+  }
+
+  if (procUuids.length > 0) {
+    compositionSections.push({
+      title: "Tindakan Medis",
+      code: {
+        coding: [
+          {
+            system: "http://loinc.org",
+            code: "18776-5",
+            display: "Plan of care note"
+          }
+        ]
+      },
+      entry: procUuids.map(uuid => ({ reference: uuid }))
+    });
+  }
+
+  if (medReqUuids.length > 0) {
+    compositionSections.push({
+      title: "Resep Obat",
+      code: {
+        coding: [
+          {
+            system: "http://loinc.org",
+            code: "29551-9",
+            display: "Medication prescribed"
+          }
+        ]
+      },
+      entry: medReqUuids.map(uuid => ({ reference: uuid }))
+    });
+  }
+
+  compositionSections.push({
+    title: "Instruksi Tindak Lanjut",
+    code: {
+      coding: [
+        {
+          system: "http://loinc.org",
+          code: "28574-2",
+          display: "Discharge instructions instructions"
+        }
+      ]
+    },
+    text: {
+      status: "generated",
+      div: `<div xmlns="http://www.w3.org/1999/xhtml">${dataComplete.rekamMedis?.instruksiMedis || dataComplete.rekamMedis?.rencanaTerapi || "Kontrol sesuai petunjuk dokter"}</div>`
+    }
+  });
+
+  compositionPayload.section = compositionSections;
+
+  entries.push({
+    fullUrl: compositionUuid,
+    resource: compositionPayload,
+    request: {
+      method: "POST",
+      url: "Composition"
+    }
   });
 
   return {
@@ -11611,3 +11582,208 @@ const buildSpecimenPayload = (data, orgId) => {
 };
 
 module.exports = { buildSpecimenPayload };
+
+--- FILE: src\workers\satusehat.worker.js ---
+const { Worker } = require('bullmq');
+const redisConnection = require('../config/redis');
+const prisma = require('../config/prisma');
+const SatuSehatGateway = require('../services/satusehat/gateway.service');
+const { toRawatJalanBundle } = require('../utils/fhir-mappers');
+
+const extractObservationsFromScreening = (screening) => {
+  if (!screening) return [];
+  const obs = [];
+
+  if (screening.tekananDarahSistolik || screening.tekananDarahDiastolik) {
+    obs.push({
+      loincCode: "85354-9",
+      loincDisplay: "Blood pressure panel with all children optional",
+      components: [
+        {
+          code: { coding: [{ system: "http://loinc.org", code: "8480-6", display: "Systolic blood pressure" }] },
+          valueQuantity: { value: screening.tekananDarahSistolik || 120, unit: "mm[Hg]", system: "http://unitsofmeasure.org", code: "mm[Hg]" }
+        },
+        {
+          code: { coding: [{ system: "http://loinc.org", code: "8462-4", display: "Diastolic blood pressure" }] },
+          valueQuantity: { value: screening.tekananDarahDiastolik || 80, unit: "mm[Hg]", system: "http://unitsofmeasure.org", code: "mm[Hg]" }
+        }
+      ]
+    });
+  }
+
+  if (screening.nadi) {
+    obs.push({
+      loincCode: "8867-4",
+      loincDisplay: "Heart rate",
+      value: screening.nadi,
+      unit: "/min",
+      unitCode: "/min"
+    });
+  }
+
+  if (screening.frekuensiNapas) {
+    obs.push({
+      loincCode: "9279-1",
+      loincDisplay: "Respiratory rate",
+      value: screening.frekuensiNapas,
+      unit: "/min",
+      unitCode: "/min"
+    });
+  }
+
+  if (screening.suhuTubuh) {
+    obs.push({
+      loincCode: "8310-5",
+      loincDisplay: "Body temperature",
+      value: screening.suhuTubuh,
+      unit: "C",
+      unitCode: "Cel"
+    });
+  }
+
+  if (screening.tinggiBadan) {
+    obs.push({
+      loincCode: "8302-2",
+      loincDisplay: "Body height",
+      value: screening.tinggiBadan,
+      unit: "cm",
+      unitCode: "cm"
+    });
+  }
+
+  if (screening.beratBadan) {
+    obs.push({
+      loincCode: "29463-7",
+      loincDisplay: "Body weight",
+      value: screening.beratBadan,
+      unit: "kg",
+      unitCode: "kg"
+    });
+  }
+
+  return obs;
+};
+
+const satusehatWorker = new Worker(
+  'satusehat-sync',
+  async (job) => {
+    const { kunjunganId } = job.data;
+    console.log(`[Worker SATUSEHAT] Memproses job ${job.id} (attempt ${job.attemptsMade + 1}) untuk kunjungan ID: ${kunjunganId}`);
+
+    const dataComplete = await prisma.kunjungan.findUnique({
+      where: { id: kunjunganId },
+      include: {
+        pasien: true,
+        poliklinik: true,
+        screening: true,
+        rekamMedis: true,
+        persetujuan: true,
+        diagnosis: {
+          include: { icd10: true }
+        },
+        tindakans: {
+          include: { icd9: true }
+        },
+        resep: {
+          include: {
+            details: {
+              include: { obat: true }
+            }
+          }
+        },
+        dokterTujuan: {
+          include: { tenagaMedis: true }
+        }
+      }
+    });
+
+    if (!dataComplete) {
+      throw new Error(`Data kunjungan dengan ID ${kunjunganId} tidak ditemukan`);
+    }
+
+    if (dataComplete.persetujuan && dataComplete.persetujuan.persetujuanSatusehat === false) {
+      console.log(`[Worker SATUSEHAT] Kunjungan ${kunjunganId} di-skip karena persetujuanSatusehat = false.`);
+      await prisma.kunjungan.update({
+        where: { id: kunjunganId },
+        data: {
+          satusehat_sync_status: 'SKIPPED_NO_CONSENT',
+          satusehat_last_error: null
+        }
+      });
+      return { status: 'SKIPPED_NO_CONSENT' };
+    }
+
+    const resepDetails = [];
+    if (Array.isArray(dataComplete.resep)) {
+      dataComplete.resep.forEach((r) => {
+        if (Array.isArray(r.details)) {
+          r.details.forEach((d) => resepDetails.push({ ...d, resepId: r.id }));
+        }
+      });
+    }
+
+    const observations = extractObservationsFromScreening(dataComplete.screening);
+
+    const completePayload = {
+      ...dataComplete,
+      observations,
+      resepDetails,
+      satusehat_encounter_id: dataComplete.satusehat_encounter_id || dataComplete.satusehatId || dataComplete.encounterId
+    };
+
+    const bundlePayload = toRawatJalanBundle(completePayload);
+
+    try {
+      console.log(`[Worker SATUSEHAT] Mengirim Bundle Transaction untuk kunjungan ${kunjunganId}...`);
+      const response = await SatuSehatGateway.sendBundleTransaction(bundlePayload);
+
+      await prisma.kunjungan.update({
+        where: { id: kunjunganId },
+        data: {
+          satusehat_sync_status: 'SUCCESS',
+          satusehat_last_error: null,
+          satusehatSync: {
+            bundleTransaction: {
+              status: 'SUCCESS',
+              response,
+              timestamp: new Date().toISOString()
+            }
+          }
+        }
+      });
+
+      console.log(`[Worker SATUSEHAT] ✅ Sukses sync bundle untuk kunjungan ${kunjunganId}`);
+      return { status: 'SUCCESS', response };
+    } catch (error) {
+      const lastError = error.message || String(error);
+      console.error(`[Worker SATUSEHAT Error] ❌ Gagal sync bundle untuk kunjungan ${kunjunganId}:`, lastError);
+
+      try {
+        await prisma.kunjungan.update({
+          where: { id: kunjunganId },
+          data: {
+            satusehat_sync_status: 'FAILED',
+            satusehat_last_error: lastError
+          }
+        });
+      } catch (dbErr) {
+        console.error(`[DB Error] Gagal update status FAILED ke database:`, dbErr.message);
+      }
+
+      throw error;
+    }
+  },
+  {
+    connection: redisConnection
+  }
+);
+
+satusehatWorker.on('completed', (job) => {
+  console.log(`[Worker Event] Job ${job.id} selesai diproses.`);
+});
+
+satusehatWorker.on('failed', (job, err) => {
+  console.error(`[Worker Event] Job ${job?.id} gagal (Attempts: ${job?.attemptsMade}): ${err.message}`);
+});
+
+module.exports = satusehatWorker;
