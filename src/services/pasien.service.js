@@ -38,6 +38,34 @@ const createPasien = async (data) => {
     }
   }
 
+  let newIhs = data.noIHS;
+  if (!newIhs && data.nik) {
+    try {
+      if (data.isBayi) {
+        // Bayi belum punya NIK, jadi kita lewati tahap GET Patient By NIK
+        // Langsung POST pendaftaran karena kita menggunakan NIK Ibunya
+        const postRes = await satusehatService.createPatient(data);
+        if (postRes.success && postRes.ihsNumber) {
+          newIhs = postRes.ihsNumber;
+        }
+      } else {
+        // Cek apakah NIK sudah ada di SATUSEHAT
+        const checkRes = await satusehatService.getPatientByNIK(data.nik);
+        if (checkRes.success && checkRes.ihsNumber) {
+          newIhs = checkRes.ihsNumber;
+        } else {
+          // Jika tidak ada, daftarkan pasien baru ke SATUSEHAT
+          const postRes = await satusehatService.createPatient(data);
+          if (postRes.success && postRes.ihsNumber) {
+            newIhs = postRes.ihsNumber;
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Gagal sinkronisasi pendaftaran ke SATUSEHAT:", e.message);
+    }
+  }
+
   // Gunakan transaksi untuk memastikan semua data tersimpan atau tidak sama sekali (atomic)
   const newPasien = await prisma.$transaction(async (tx) => {
     
@@ -50,7 +78,7 @@ const createPasien = async (data) => {
       pasien = await tx.pasien.create({
         data: {
           noRM: data.noRekamMedis,
-          noIHS: data.noIHS,
+          noIHS: newIhs || null,
           nik: data.nik,
           noKk: data.noKk,
           namaLengkap: data.namaLengkap,
@@ -125,11 +153,13 @@ const createPasien = async (data) => {
       });
     }
 
-    // 0. Generate Nomor Antrean
-    const poliklinik = await tx.poliklinik.findUnique({
-      where: { id: data.poliTujuan }
-    });
-    const prefix = poliklinik ? poliklinik.kodePoli.charAt(0).toUpperCase() : 'U';
+    // 0. Generate Nomor Antrean (Opsional jika poliTujuan ada)
+    let kunjungan = null;
+    if (data.poliTujuan) {
+      const poliklinik = await tx.poliklinik.findUnique({
+        where: { id: data.poliTujuan }
+      });
+      const prefix = poliklinik ? poliklinik.kodePoli.charAt(0).toUpperCase() : 'U';
     
     const regDate = new Date(data.tanggalRegistrasi);
     const startOfDay = new Date(regDate.setHours(0, 0, 0, 0));
@@ -240,6 +270,7 @@ const createPasien = async (data) => {
         console.error('Failed to create Encounter in SATUSEHAT:', error);
         // We don't throw here to ensure local registration still succeeds
       }
+    } // End if (data.poliTujuan)
     }
 
     return { ...pasien, kunjungan };
@@ -255,6 +286,7 @@ const getAllPasien = async () => {
       kontak: true,
       sosial: true,
       penjamin: true,
+      dataBayi: true,
     },
     orderBy: {
       createdAt: 'desc'

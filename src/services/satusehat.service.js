@@ -1,4 +1,5 @@
 const axios = require('axios');
+const crypto = require('crypto');
 const satusehatConfig = require('../config/satusehat');
 const { createFhirClient, generateAccessToken } = require('../utils/satusehat-client');
 
@@ -39,6 +40,42 @@ const getPatientByNIK = async (nik) => {
 };
 
 /**
+ * Pendaftaran Pasien Baru ke SATUSEHAT
+ * @param {Object} data - data lengkap pasien dari frontend (NIK, Nama, TanggalLahir, dll)
+ * @returns {Promise<Object>} Respons dengan Nomor IHS baru
+ */
+const createPatient = async (data) => {
+  try {
+    const fhirClient = await createFhirClient();
+    const payload = buildPatientPayload(data);
+    
+    console.log("[SATUSEHAT] Mengirim POST /Patient dengan payload:", JSON.stringify(payload, null, 2));
+
+    const response = await fhirClient.post('/Patient', payload);
+
+    return {
+      success: true,
+      data: response.data,
+      ihsNumber: response.data.id // Nomor IHS selalu berada di atribut .id
+    };
+  } catch (error) {
+    if (error.response?.data?.resourceType === 'Patient') {
+      console.log(`[SATUSEHAT] NIK ${data.nik} sudah terdaftar sebelumnya, mengambil ID lama: ${error.response.data.id}`);
+      return {
+        success: true,
+        data: error.response.data,
+        ihsNumber: error.response.data.id
+      };
+    }
+
+    const issue = error.response?.data?.issue?.[0];
+    const errorMessage = issue?.diagnostics || issue?.details?.text || error.message;
+    console.error(`[SATUSEHAT] Error creating patient for NIK ${data.nik}:`, error.response?.data ? JSON.stringify(error.response?.data, null, 2) : error.message);
+    throw new Error(errorMessage || 'Terjadi kesalahan saat mendaftarkan pasien ke SATUSEHAT');
+  }
+};
+
+/**
  * Search Practitioner (Tenaga Medis) by NIK
  * @param {string} nik - NIK Praktisioner
  * @returns {Promise<Object>} Practitioner Data (including IHS Number)
@@ -75,9 +112,10 @@ const getPractitionerByNIK = async (nik) => {
 };
 
 const { buildLocationPayload } = require('../utils/fhir-mappers/location.mapper');
-const { buildEncounterPayload } = require('../utils/fhir-mappers/encounter.mapper');
-const { buildObservationPayload } = require('../utils/fhir-mappers/observation.mapper');
 const { buildConditionPayload } = require('../utils/fhir-mappers/condition.mapper');
+const { buildObservationPayload } = require('../utils/fhir-mappers/observation.mapper');
+const { buildPatientPayload } = require('../utils/fhir-mappers/patient.mapper');
+const { buildEncounterPayload } = require('../utils/fhir-mappers/encounter.mapper');
 const { buildMedicationPayload, buildMedicationRequestPayload } = require('../utils/fhir-mappers/medication.mapper');
 const { buildProcedurePayload } = require('../utils/fhir-mappers/procedure.mapper');
 const { buildAllergyPayload } = require('../utils/fhir-mappers/allergy.mapper');
@@ -193,6 +231,68 @@ const createObservation = async (data) => {
     success: true,
     data: response.data,
     observationId: response.data.id
+  };
+};
+
+/**
+ * Mengirim sekumpulan Tanda-Tanda Vital (Observation) dalam 1 Bundle Transaction
+ * @param {Array<Object>} observationsData - array payload (pasienIhs, pasienName, dokterIhs, dokterName, encounterId, loincCode, dll)
+ * @returns {Promise<Object>} Response Bundle
+ */
+const createObservationBundle = async (observationsData) => {
+  if (!observationsData || observationsData.length === 0) return { success: true, observationIds: [] };
+
+  const fhirClient = await createFhirClient();
+  const orgId = satusehatConfig.SATUSEHAT_ORG_ID;
+  
+  if (!orgId) {
+    throw new Error('SATUSEHAT_ORG_ID belum dikonfigurasi di file .env');
+  }
+
+  // Rakit resource Bundle
+  const bundle = {
+    resourceType: "Bundle",
+    type: "transaction",
+    entry: []
+  };
+
+  // Masukkan tiap observation ke dalam Bundle Entry
+  for (const data of observationsData) {
+    const observationPayload = buildObservationPayload(data);
+    bundle.entry.push({
+      fullUrl: `urn:uuid:${crypto.randomUUID()}`,
+      resource: observationPayload,
+      request: {
+        method: "POST",
+        url: "Observation"
+      }
+    });
+  }
+
+  console.log(`[SATUSEHAT] Mengirim Observation Bundle (${observationsData.length} data):`, JSON.stringify(bundle, null, 2));
+
+  // Post ke root URL ('/') karena tipe Bundle transaction
+  const response = await fhirClient.post('/', bundle);
+  
+  // Ekstrak ID yang berhasil di-generate dari response
+  const observationIds = [];
+  if (response.data && response.data.entry) {
+    response.data.entry.forEach(entry => {
+      // Biasanya kembalian dari POST Bundle ada di entry[i].response.location
+      // Contoh: "Observation/12345/_history/1"
+      if (entry.response && entry.response.location) {
+        const parts = entry.response.location.split('/');
+        if (parts.length >= 2) {
+          observationIds.push(parts[1]); // ID berada setelah "Observation/"
+        }
+      }
+    });
+  }
+  
+  return {
+    success: true,
+    data: response.data,
+    observationIds: observationIds
   };
 };
 
@@ -384,8 +484,10 @@ module.exports = {
   getPatientByNIK,
   getPractitionerByNIK,
   createLocation,
+  createPatient,
   createEncounter,
   createObservation,
+  createObservationBundle,
   createCondition,
   createPrescription,
   createProcedure,
