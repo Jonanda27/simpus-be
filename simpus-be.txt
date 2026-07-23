@@ -105,8 +105,13 @@ model Pasien {
   id              String      @id @default(cuid())
   noRM            String      @unique
   noIHS           String?     @unique
+  satusehat_ihs   String?
   nik             String      @unique
   noKk            String?
+  noPaspor        String?
+  noKitas         String?
+  namaIbuKandung    String?
+  bahasa          String?     @default("id")
 
   namaLengkap     String
   tempatLahir     String
@@ -208,6 +213,8 @@ model DataBayi {
   panjangLahir    String?
   jamLahir        String?
   jenisPersalinan String?
+  isKelahiranGanda Boolean    @default(false)
+  urutanKelahiran  Int?       @default(1)
 }
 
 // 6. Data Penjamin / Asuransi
@@ -258,6 +265,9 @@ model Kunjungan {
   noSep             String?
   encounterId       String?     // ID Encounter dari SATUSEHAT
   satusehatSync     Json?       // Tracking sinkronisasi SATUSEHAT
+  satusehat_encounter_id String?
+  satusehat_sync_status  String   @default("PENDING")
+  satusehat_last_error    String?  @db.Text
 
   // ==========================================
   // KOLOM BRIDGING BPJS PCARE (Anti-Corruption Layer)
@@ -267,6 +277,10 @@ model Kunjungan {
   statusKlaimBpjs   String?     // PENDING_SYNC | TERKIRIM | GAGAL | TIDAK_BERLAKU
 
   statusKunjungan   String      @default("MENUNGGU") // MENUNGGU, DIPERIKSA, SELESAI, BATAL dll
+
+  waktuDischarge    DateTime?
+  caraKeluar        String?     // "PERSATUAN_DOKTER", "RUJUK", "PULANG_PAKSA", "MENINGGAL"
+  kondisiDischarge   String?     // "SEMBUH", "MEMBAIK", "BELUM_SEMBUH", "MENINGGAL"
 
   // Relasi Ke Petugas (User)
   userPendaftarId   String?
@@ -620,12 +634,15 @@ model LayananKlinik {
 model MasterObat {
   id              String      @id @default(cuid())
   kodeObat        String      @unique
+  kfa_code        String?
   namaObat        String
   kategori        String      // Obat Bebas, Obat Keras, Narkotika, dll
   sediaan         String      // Tablet, Kapsul, Sirup, Injeksi, Salep
   harga           Float       @default(0)
   stok            Int         @default(0)
   gambarUrl       String?     // URL gambar (mockup)
+  noBatch         String?
+  tanggalExpired  DateTime?
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
 
@@ -663,6 +680,10 @@ model ResepDetail {
   jumlah          Int
   aturanPakai     String      // Contoh: 3 x 1 Tablet sesudah makan
   catatan         String?
+  dosisAngka      Float?      // Misal: 500
+  dosisSatuan     String?     // Misal: "mg"
+  rutePemberian   String?     @default("O") // Code WHO ATC / SNOMED CT (O = Oral)
+  frekuensi       Int?        @default(3)   // 3 kali sehari
 }
 
 model RujukanKeluar {
@@ -1194,6 +1215,15 @@ model SampelLaboratorium {
   kondisiSpesimen       String?           // available | unavailable | autolyzed
   metodePengambilan     String?           // Kode SNOMED CT metode
   catatan               String?           @db.Text
+
+  statusPuasa           Boolean           @default(false)
+  petugasPengantar      String?
+  petugasPenerima       String?
+  petugasPenganalisis   String?
+  prosedurFiksasi       String?
+  waktuFiksasi          DateTime?
+  cairanFiksasi         String?
+  volumeCairanFiksasi   Float?
 
   satusehatSync         Json?
 
@@ -4180,11 +4210,15 @@ const simpanTindakan = async (req, res, next) => {
 const selesaikanPemeriksaan = async (req, res, next) => {
   try {
     const { kunjunganId } = req.params;
-    const data = await rawatJalanService.selesaikanPemeriksaan(kunjunganId, req.user);
+    const result = await rawatJalanService.selesaikanPemeriksaan(kunjunganId, req.user);
     res.status(200).json({
       success: true,
       message: 'Pemeriksaan selesai',
-      data,
+      data: result.rekamMedis || result,
+      satusehat: {
+        syncStatus: result.satusehat_sync_status || 'PENDING',
+        lastError: result.satusehat_last_error || null
+      }
     });
   } catch (error) {
     next(error);
@@ -4396,7 +4430,12 @@ const syncPatientIHS = async (req, res, next) => {
 
     const updatedPasien = await prisma.pasien.update({
       where: { nik: nik },
-      data: { noIHS: ihsNumber }
+      data: { noIHS: ihsNumber },
+      include: {
+        alamat: true,
+        kontak: true,
+        penjamin: true
+      }
     }).catch(() => null);
 
     return res.status(200).json({
@@ -4408,6 +4447,9 @@ const syncPatientIHS = async (req, res, next) => {
         pasienName: result.data.name?.[0]?.text || '',
         birthDate: result.data.birthDate || '',
         gender: result.data.gender || '',
+        address: result.data.address || [],
+        telecom: result.data.telecom || [],
+        localPasien: updatedPasien,
         updatedInDb: !!updatedPasien
       }
     });
@@ -6795,6 +6837,33 @@ const createPasien = async (data) => {
     }
   }
 
+  let newIhs = data.noIHS;
+  if (!newIhs && data.nik) {
+    try {
+      if (data.isBayi) {
+
+        const postRes = await satusehatService.createPatient(data);
+        if (postRes.success && postRes.ihsNumber) {
+          newIhs = postRes.ihsNumber;
+        }
+      } else {
+
+        const checkRes = await satusehatService.getPatientByNIK(data.nik);
+        if (checkRes.success && checkRes.ihsNumber) {
+          newIhs = checkRes.ihsNumber;
+        } else {
+
+          const postRes = await satusehatService.createPatient(data);
+          if (postRes.success && postRes.ihsNumber) {
+            newIhs = postRes.ihsNumber;
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Gagal sinkronisasi pendaftaran ke SATUSEHAT:", e.message);
+    }
+  }
+
   const newPasien = await prisma.$transaction(async (tx) => {
 
     let pasien = await tx.pasien.findUnique({
@@ -6805,7 +6874,7 @@ const createPasien = async (data) => {
       pasien = await tx.pasien.create({
         data: {
           noRM: data.noRekamMedis,
-          noIHS: data.noIHS,
+          noIHS: newIhs || null,
           nik: data.nik,
           noKk: data.noKk,
           namaLengkap: data.namaLengkap,
@@ -6879,10 +6948,12 @@ const createPasien = async (data) => {
       });
     }
 
-    const poliklinik = await tx.poliklinik.findUnique({
-      where: { id: data.poliTujuan }
-    });
-    const prefix = poliklinik ? poliklinik.kodePoli.charAt(0).toUpperCase() : 'U';
+    let kunjungan = null;
+    if (data.poliTujuan) {
+      const poliklinik = await tx.poliklinik.findUnique({
+        where: { id: data.poliTujuan }
+      });
+      const prefix = poliklinik ? poliklinik.kodePoli.charAt(0).toUpperCase() : 'U';
 
     const regDate = new Date(data.tanggalRegistrasi);
     const startOfDay = new Date(regDate.setHours(0, 0, 0, 0));
@@ -6990,6 +7061,7 @@ const createPasien = async (data) => {
 
       }
     }
+    }
 
     const isBpjs = data.jenisPenjamin === 'BPJS' || data.jenisPenjamin === 'BPJS Kesehatan';
     const hasBpjsCredentials = bpjsConfig.BPJS_CONS_ID && bpjsConfig.BPJS_SECRET_KEY;
@@ -7046,6 +7118,7 @@ const getAllPasien = async () => {
       kontak: true,
       sosial: true,
       penjamin: true,
+      dataBayi: true,
     },
     orderBy: {
       createdAt: 'desc'
@@ -7291,6 +7364,82 @@ module.exports = radiologiService;
 const prisma = require('../config/prisma');
 const ukmService = require('./ukm.service');
 const satusehatService = require('./satusehat.service');
+const SatuSehatGateway = require('./satusehat/gateway.service');
+const { toRawatJalanBundle } = require('../utils/fhir-mappers');
+
+const extractObservationsFromScreening = (screening) => {
+  if (!screening) return [];
+  const obs = [];
+
+  if (screening.tekananDarahSistolik || screening.tekananDarahDiastolik) {
+    obs.push({
+      loincCode: "85354-9",
+      loincDisplay: "Blood pressure panel with all children optional",
+      components: [
+        {
+          code: { coding: [{ system: "http://loinc.org", code: "8480-6", display: "Systolic blood pressure" }] },
+          valueQuantity: { value: screening.tekananDarahSistolik || 120, unit: "mm[Hg]", system: "http://unitsofmeasure.org", code: "mm[Hg]" }
+        },
+        {
+          code: { coding: [{ system: "http://loinc.org", code: "8462-4", display: "Diastolic blood pressure" }] },
+          valueQuantity: { value: screening.tekananDarahDiastolik || 80, unit: "mm[Hg]", system: "http://unitsofmeasure.org", code: "mm[Hg]" }
+        }
+      ]
+    });
+  }
+
+  if (screening.nadi) {
+    obs.push({
+      loincCode: "8867-4",
+      loincDisplay: "Heart rate",
+      value: screening.nadi,
+      unit: "/min",
+      unitCode: "/min"
+    });
+  }
+
+  if (screening.frekuensiNapas) {
+    obs.push({
+      loincCode: "9279-1",
+      loincDisplay: "Respiratory rate",
+      value: screening.frekuensiNapas,
+      unit: "/min",
+      unitCode: "/min"
+    });
+  }
+
+  if (screening.suhuTubuh) {
+    obs.push({
+      loincCode: "8310-5",
+      loincDisplay: "Body temperature",
+      value: screening.suhuTubuh,
+      unit: "C",
+      unitCode: "Cel"
+    });
+  }
+
+  if (screening.tinggiBadan) {
+    obs.push({
+      loincCode: "8302-2",
+      loincDisplay: "Body height",
+      value: screening.tinggiBadan,
+      unit: "cm",
+      unitCode: "cm"
+    });
+  }
+
+  if (screening.beratBadan) {
+    obs.push({
+      loincCode: "29463-7",
+      loincDisplay: "Body weight",
+      value: screening.beratBadan,
+      unit: "kg",
+      unitCode: "kg"
+    });
+  }
+
+  return obs;
+};
 
 const getAntrianDokter = async (user) => {
   const today = new Date();
@@ -7758,20 +7907,125 @@ const simpanAlergi = async (kunjunganId, alergiArr, user) => {
 };
 
 const selesaikanPemeriksaan = async (kunjunganId, user) => {
-  return await prisma.$transaction(async (tx) => {
 
+  const rm = await prisma.$transaction(async (tx) => {
     const updateData = { statusPemeriksaan: 'SELESAI' };
-
     if (user && user.role === 'PERAWAT') {
       updateData.penginputId = user.id;
     }
 
-    const rm = await tx.rekamMedis.update({
+    const updatedRm = await tx.rekamMedis.update({
       where: { kunjunganId },
       data: updateData,
     });
 
+    await tx.kunjungan.update({
+      where: { id: kunjunganId },
+      data: {
+        statusKunjungan: 'SELESAI',
+        waktuDischarge: new Date()
+      },
+    });
+
+    return updatedRm;
   });
+
+  let syncStatus = 'PENDING';
+  let lastError = null;
+
+  try {
+    const dataComplete = await prisma.kunjungan.findUnique({
+      where: { id: kunjunganId },
+      include: {
+        pasien: true,
+        poliklinik: true,
+        screening: true,
+        rekamMedis: true,
+        diagnosis: {
+          include: { icd10: true }
+        },
+        tindakans: {
+          include: { icd9: true }
+        },
+        resep: {
+          include: {
+            details: {
+              include: { obat: true }
+            }
+          }
+        },
+        dokterTujuan: {
+          include: { tenagaMedis: true }
+        }
+      }
+    });
+
+    if (dataComplete) {
+
+      const resepDetails = [];
+      if (Array.isArray(dataComplete.resep)) {
+        dataComplete.resep.forEach(r => {
+          if (Array.isArray(r.details)) {
+            r.details.forEach(d => resepDetails.push({ ...d, resepId: r.id }));
+          }
+        });
+      }
+
+      const observations = extractObservationsFromScreening(dataComplete.screening);
+
+      const completePayload = {
+        ...dataComplete,
+        observations,
+        resepDetails,
+        satusehat_encounter_id: dataComplete.satusehat_encounter_id || dataComplete.satusehatId || dataComplete.encounterId
+      };
+
+      const bundlePayload = toRawatJalanBundle(completePayload);
+
+      console.log(`[SATUSEHAT RawatJalan] Mengirim Bundle Transaction untuk kunjungan ${kunjunganId}...`);
+      const response = await SatuSehatGateway.sendBundleTransaction(bundlePayload);
+
+      syncStatus = 'SUCCESS';
+      lastError = null;
+
+      await prisma.kunjungan.update({
+        where: { id: kunjunganId },
+        data: {
+          satusehat_sync_status: 'SUCCESS',
+          satusehat_last_error: null,
+          satusehatSync: {
+            bundleTransaction: {
+              status: 'SUCCESS',
+              response,
+              timestamp: new Date().toISOString()
+            }
+          }
+        }
+      });
+    }
+  } catch (error) {
+    syncStatus = 'FAILED';
+    lastError = error.message || String(error);
+    console.error(`[SATUSEHAT RawatJalan] Gagal sync Bundle Transaction untuk kunjungan ${kunjunganId}:`, lastError);
+
+    try {
+      await prisma.kunjungan.update({
+        where: { id: kunjunganId },
+        data: {
+          satusehat_sync_status: 'FAILED',
+          satusehat_last_error: lastError
+        }
+      });
+    } catch (dbErr) {
+      console.error(`[DB Error] Gagal update satusehat_last_error:`, dbErr.message);
+    }
+  }
+
+  return {
+    rekamMedis: rm,
+    satusehat_sync_status: syncStatus,
+    satusehat_last_error: lastError
+  };
 };
 
 const tundaPemeriksaan = async (kunjunganId) => {
@@ -7952,6 +8206,7 @@ module.exports = {
   simpanDiagnosa,
   simpanTindakan,
   selesaikanPemeriksaan,
+  selesaikanKunjungan: selesaikanPemeriksaan,
   tundaPemeriksaan,
   getRekamMedisByKunjungan,
   getDiagnosaByKunjungan,
@@ -8032,6 +8287,7 @@ module.exports = {
 
 --- FILE: src\services\satusehat.service.js ---
 const axios = require('axios');
+const crypto = require('crypto');
 const satusehatConfig = require('../config/satusehat');
 const { createFhirClient, generateAccessToken } = require('../utils/satusehat-client');
 
@@ -8063,6 +8319,37 @@ const getPatientByNIK = async (nik) => {
   }
 };
 
+const createPatient = async (data) => {
+  try {
+    const fhirClient = await createFhirClient();
+    const payload = buildPatientPayload(data);
+
+    console.log("[SATUSEHAT] Mengirim POST /Patient dengan payload:", JSON.stringify(payload, null, 2));
+
+    const response = await fhirClient.post('/Patient', payload);
+
+    return {
+      success: true,
+      data: response.data,
+      ihsNumber: response.data.id
+    };
+  } catch (error) {
+    if (error.response?.data?.resourceType === 'Patient') {
+      console.log(`[SATUSEHAT] NIK ${data.nik} sudah terdaftar sebelumnya, mengambil ID lama: ${error.response.data.id}`);
+      return {
+        success: true,
+        data: error.response.data,
+        ihsNumber: error.response.data.id
+      };
+    }
+
+    const issue = error.response?.data?.issue?.[0];
+    const errorMessage = issue?.diagnostics || issue?.details?.text || error.message;
+    console.error(`[SATUSEHAT] Error creating patient for NIK ${data.nik}:`, error.response?.data ? JSON.stringify(error.response?.data, null, 2) : error.message);
+    throw new Error(errorMessage || 'Terjadi kesalahan saat mendaftarkan pasien ke SATUSEHAT');
+  }
+};
+
 const getPractitionerByNIK = async (nik) => {
   try {
     const fhirClient = await createFhirClient();
@@ -8091,14 +8378,22 @@ const getPractitionerByNIK = async (nik) => {
   }
 };
 
-const { buildLocationPayload } = require('../utils/fhir-mappers/location.mapper');
-const { buildEncounterPayload } = require('../utils/fhir-mappers/encounter.mapper');
-const { buildObservationPayload } = require('../utils/fhir-mappers/observation.mapper');
-const { buildConditionPayload } = require('../utils/fhir-mappers/condition.mapper');
-const { buildMedicationPayload, buildMedicationRequestPayload } = require('../utils/fhir-mappers/medication.mapper');
-const { buildProcedurePayload } = require('../utils/fhir-mappers/procedure.mapper');
-const { buildAllergyPayload } = require('../utils/fhir-mappers/allergy.mapper');
-const { buildMedicationDispensePayload } = require('../utils/fhir-mappers/medication-dispense.mapper');
+const {
+  buildLocationPayload,
+  buildEncounterPayload,
+  buildObservationPayload,
+  buildConditionPayload,
+  buildMedicationPayload,
+  buildMedicationRequestPayload,
+  buildProcedurePayload,
+  buildAllergyPayload,
+  buildMedicationDispensePayload,
+  buildPatientPayload,
+  buildCompositionPayload,
+  buildClinicalImpressionPayload,
+  buildServiceRequestPayload,
+  buildSpecimenPayload
+} = require('../utils/fhir-mappers');
 
 const createLocation = async (poliklinik) => {
   try {
@@ -8189,6 +8484,58 @@ const createObservation = async (data) => {
     success: true,
     data: response.data,
     observationId: response.data.id
+  };
+};
+
+const createObservationBundle = async (observationsData) => {
+  if (!observationsData || observationsData.length === 0) return { success: true, observationIds: [] };
+
+  const fhirClient = await createFhirClient();
+  const orgId = satusehatConfig.SATUSEHAT_ORG_ID;
+
+  if (!orgId) {
+    throw new Error('SATUSEHAT_ORG_ID belum dikonfigurasi di file .env');
+  }
+
+  const bundle = {
+    resourceType: "Bundle",
+    type: "transaction",
+    entry: []
+  };
+
+  for (const data of observationsData) {
+    const observationPayload = buildObservationPayload(data);
+    bundle.entry.push({
+      fullUrl: `urn:uuid:${crypto.randomUUID()}`,
+      resource: observationPayload,
+      request: {
+        method: "POST",
+        url: "Observation"
+      }
+    });
+  }
+
+  console.log(`[SATUSEHAT] Mengirim Observation Bundle (${observationsData.length} data):`, JSON.stringify(bundle, null, 2));
+
+  const response = await fhirClient.post('/', bundle);
+
+  const observationIds = [];
+  if (response.data && response.data.entry) {
+    response.data.entry.forEach(entry => {
+
+      if (entry.response && entry.response.location) {
+        const parts = entry.response.location.split('/');
+        if (parts.length >= 2) {
+          observationIds.push(parts[1]);
+        }
+      }
+    });
+  }
+
+  return {
+    success: true,
+    data: response.data,
+    observationIds: observationIds
   };
 };
 
@@ -8349,8 +8696,10 @@ module.exports = {
   getPatientByNIK,
   getPractitionerByNIK,
   createLocation,
+  createPatient,
   createEncounter,
   createObservation,
+  createObservationBundle,
   createCondition,
   createPrescription,
   createProcedure,
@@ -8514,46 +8863,43 @@ const sendObservationToSatuSehat = async (screeningId) => {
       encounterId: kunjungan.encounterId,
     };
 
-    const observationIds = [];
+    const observationPayloads = [];
 
     if (screening.suhuTubuh) {
-      const res = await satusehatService.createObservation({
+      observationPayloads.push({
         ...basePayload,
         loincCode: "8310-5",
         loincDisplay: "Body temperature",
         value: screening.suhuTubuh,
         unit: "C",
         unitCode: "Cel"
-      }).catch(e => console.error("Error Suhu:", e.message));
-      if (res && res.success) observationIds.push({ type: 'Suhu', id: res.observationId });
+      });
     }
 
     if (screening.nadi) {
-      const res = await satusehatService.createObservation({
+      observationPayloads.push({
         ...basePayload,
         loincCode: "8867-4",
         loincDisplay: "Heart rate",
         value: screening.nadi,
         unit: "beats/minute",
         unitCode: "/min"
-      }).catch(e => console.error("Error Nadi:", e.message));
-      if (res && res.success) observationIds.push({ type: 'Nadi', id: res.observationId });
+      });
     }
 
     if (screening.saturasiOksigen) {
-      const res = await satusehatService.createObservation({
+      observationPayloads.push({
         ...basePayload,
         loincCode: "2708-6",
         loincDisplay: "Oxygen saturation in Arterial blood",
         value: screening.saturasiOksigen,
         unit: "%",
         unitCode: "%"
-      }).catch(e => console.error("Error SpO2:", e.message));
-      if (res && res.success) observationIds.push({ type: 'SpO2', id: res.observationId });
+      });
     }
 
     if (screening.tekananDarahSistolik && screening.tekananDarahDiastolik) {
-      const res = await satusehatService.createObservation({
+      observationPayloads.push({
         ...basePayload,
         loincCode: "85354-9",
         loincDisplay: "Blood pressure panel with all children optional",
@@ -8571,56 +8917,67 @@ const sendObservationToSatuSehat = async (screeningId) => {
             valueQuantity: { value: screening.tekananDarahDiastolik, unit: "mm[Hg]", system: "http://unitsofmeasure.org", code: "mm[Hg]" }
           }
         ]
-      }).catch(e => console.error("Error Tensi:", e.message));
-      if (res && res.success) observationIds.push({ type: 'Tekanan Darah', id: res.observationId });
+      });
     }
 
     if (screening.frekuensiNapas) {
-      const res = await satusehatService.createObservation({
+      observationPayloads.push({
         ...basePayload,
         loincCode: "9279-1",
         loincDisplay: "Respiratory rate",
         value: screening.frekuensiNapas,
         unit: "breaths/minute",
         unitCode: "/min"
-      }).catch(e => console.error("Error Napas:", e.message));
-      if (res && res.success) observationIds.push({ type: 'Napas', id: res.observationId });
+      });
     }
 
     if (screening.tinggiBadan) {
-      const res = await satusehatService.createObservation({
+      observationPayloads.push({
         ...basePayload,
         loincCode: "8302-2",
         loincDisplay: "Body height",
         value: screening.tinggiBadan,
         unit: "cm",
         unitCode: "cm"
-      }).catch(e => console.error("Error Tinggi:", e.message));
-      if (res && res.success) observationIds.push({ type: 'Tinggi Badan', id: res.observationId });
+      });
     }
 
     if (screening.beratBadan) {
-      const res = await satusehatService.createObservation({
+      observationPayloads.push({
         ...basePayload,
         loincCode: "29463-7",
         loincDisplay: "Body weight",
         value: screening.beratBadan,
         unit: "kg",
         unitCode: "kg"
-      }).catch(e => console.error("Error Berat:", e.message));
-      if (res && res.success) observationIds.push({ type: 'Berat Badan', id: res.observationId });
+      });
     }
 
     if (screening.lingkarPerut) {
-      const res = await satusehatService.createObservation({
+      observationPayloads.push({
         ...basePayload,
         loincCode: "8280-0",
         loincDisplay: "Waist Circumference at umbilicus by Tape measure",
         value: screening.lingkarPerut,
         unit: "cm",
         unitCode: "cm"
-      }).catch(e => console.error("Error Lingkar Perut:", e.message));
-      if (res && res.success) observationIds.push({ type: 'Lingkar Perut', id: res.observationId });
+      });
+    }
+
+    let observationIds = [];
+    if (observationPayloads.length > 0) {
+      try {
+        const resBundle = await satusehatService.createObservationBundle(observationPayloads);
+        if (resBundle && resBundle.success) {
+
+          observationIds = resBundle.observationIds.map((id, index) => ({
+            type: `Observation_${index + 1}`,
+            id: id
+          }));
+        }
+      } catch (e) {
+        console.error("Error creating Observation Bundle:", e.message);
+      }
     }
 
     if (observationIds.length > 0) {
@@ -9236,6 +9593,7 @@ module.exports = EpisodeOfCareMapper;
 
 --- FILE: src\services\satusehat\gateway.service.js ---
 const axios = require('axios');
+const satusehatConfig = require('../../config/satusehat');
 
 class SatuSehatGateway {
 
@@ -9250,19 +9608,23 @@ class SatuSehatGateway {
         }
 
         try {
+            const authUrl = satusehatConfig?.SATUSEHAT_URL?.AUTH_URL || process.env.SATUSEHAT_AUTH_URL;
+            const clientId = satusehatConfig?.SATUSEHAT_CLIENT_ID || process.env.SATUSEHAT_CLIENT_ID;
+            const clientSecret = satusehatConfig?.SATUSEHAT_CLIENT_SECRET || process.env.SATUSEHAT_CLIENT_SECRET;
 
             const data = new URLSearchParams();
-            data.append('client_id', process.env.SATUSEHAT_CLIENT_ID);
-            data.append('client_secret', process.env.SATUSEHAT_CLIENT_SECRET);
+            data.append('client_id', clientId);
+            data.append('client_secret', clientSecret);
 
-            const response = await axios.post(process.env.SATUSEHAT_AUTH_URL, data, {
+            const url = `${authUrl}/accesstoken?grant_type=client_credentials`;
+
+            const response = await axios.post(url, data, {
                 headers: {
                     'Content-Type': 'application/x-www-form-urlencoded',
                 },
             });
 
             this.accessToken = response.data.access_token;
-
             this.tokenExpiresAt = now + (response.data.expires_in * 1000);
 
             return this.accessToken;
@@ -9274,10 +9636,28 @@ class SatuSehatGateway {
         }
     }
 
+    static async sendBundleTransaction(payload) {
+        try {
+            const token = await this.getAccessToken();
+            const baseUrl = satusehatConfig?.SATUSEHAT_URL?.FHIR_URL || process.env.SATUSEHAT_BASE_URL;
+
+            const response = await axios.post(`${baseUrl}`, payload, {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                },
+            });
+
+            return response.data;
+        } catch (error) {
+            this._handleError(error, 'POST Bundle Transaction');
+        }
+    }
+
     static async postResource(resourceType, payload) {
         try {
             const token = await this.getAccessToken();
-            const baseUrl = process.env.SATUSEHAT_BASE_URL;
+            const baseUrl = satusehatConfig?.SATUSEHAT_URL?.FHIR_URL || process.env.SATUSEHAT_BASE_URL;
 
             const response = await axios.post(`${baseUrl}/${resourceType}`, payload, {
                 headers: {
@@ -9295,7 +9675,7 @@ class SatuSehatGateway {
     static async putResource(resourceType, id, payload) {
         try {
             const token = await this.getAccessToken();
-            const baseUrl = process.env.SATUSEHAT_BASE_URL;
+            const baseUrl = satusehatConfig?.SATUSEHAT_URL?.FHIR_URL || process.env.SATUSEHAT_BASE_URL;
 
             const response = await axios.put(`${baseUrl}/${resourceType}/${id}`, payload, {
                 headers: {
@@ -9313,10 +9693,34 @@ class SatuSehatGateway {
     static _handleError(error, action) {
         console.error(`SATUSEHAT ${action} Error:`, error.response?.data || error.message);
 
-        const err = new Error(`Gagal melakukan ${action} ke SATUSEHAT`);
-        err.statusCode = error.response?.status || 500;
+        const responseData = error.response?.data;
+        let errorMessage = `Gagal melakukan ${action} ke SATUSEHAT`;
 
-        err.details = error.response?.data;
+        if (responseData) {
+            if (responseData.resourceType === 'OperationOutcome' && Array.isArray(responseData.issue)) {
+                const issues = responseData.issue
+                    .map(i => i.diagnostics || i.details?.text || i.code)
+                    .filter(Boolean)
+                    .join('; ');
+                errorMessage = `SATUSEHAT OperationOutcome Error: ${issues}`;
+            } else if (responseData.resourceType === 'Bundle' && Array.isArray(responseData.entry)) {
+                const failedEntries = responseData.entry.filter(e => e.response && !e.response.status?.startsWith('2'));
+                if (failedEntries.length > 0) {
+                    const issues = failedEntries.map(e => {
+                        const outcome = e.response.outcome;
+                        const issueText = outcome?.issue?.[0]?.diagnostics || outcome?.issue?.[0]?.details?.text || e.response.status;
+                        return `[${e.response.status}] ${issueText}`;
+                    }).join('; ');
+                    errorMessage = `SATUSEHAT Bundle Transaction Error: ${issues}`;
+                }
+            } else if (responseData.message) {
+                errorMessage = `SATUSEHAT Error: ${responseData.message}`;
+            }
+        }
+
+        const err = new Error(errorMessage);
+        err.statusCode = error.response?.status || 500;
+        err.details = responseData;
 
         throw err;
     }
@@ -9623,9 +10027,26 @@ const createFhirClient = async () => {
   });
 };
 
+const sendBundleTransaction = async (payload) => {
+  try {
+    const fhirClient = await createFhirClient();
+    const response = await fhirClient.post('', payload);
+    return response.data;
+  } catch (error) {
+    console.error('[SATUSEHAT Client] Error sending transaction bundle:', error.response?.data || error.message);
+    const issue = error.response?.data?.issue?.[0];
+    const errorMsg = issue?.diagnostics || issue?.details?.text || error.response?.data?.message || error.message;
+    const err = new Error(`Gagal mengirim Transaction Bundle ke SATUSEHAT: ${errorMsg}`);
+    err.statusCode = error.response?.status || 500;
+    err.details = error.response?.data;
+    throw err;
+  }
+};
+
 module.exports = {
   generateAccessToken,
-  createFhirClient
+  createFhirClient,
+  sendBundleTransaction
 };
 
 --- FILE: src\utils\fhir-mappers\allergy.mapper.js ---
@@ -9719,6 +10140,348 @@ module.exports = {
   buildAllergyPayload
 };
 
+--- FILE: src\utils\fhir-mappers\bundle.mapper.js ---
+const { randomUUID } = require('crypto');
+const { buildEncounterPayload } = require('./encounter.mapper');
+const { buildConditionPayload } = require('./condition.mapper');
+const { buildObservationPayload } = require('./observation.mapper');
+const { buildProcedurePayload } = require('./procedure.mapper');
+const { buildMedicationPayload, buildMedicationRequestPayload } = require('./medication.mapper');
+
+const formatRef = (resourceType, id) => {
+  if (!id) return undefined;
+  if (id.startsWith('urn:uuid:') || id.startsWith(`${resourceType}/`)) {
+    return id;
+  }
+  return `${resourceType}/${id}`;
+};
+
+const toRawatJalanBundle = (dataComplete = {}, orgId) => {
+  const organizationId = orgId || dataComplete.orgId || process.env.SATUSEHAT_ORG_ID;
+  const satusehatEncounterId = dataComplete.satusehat_encounter_id || dataComplete.encounterId || dataComplete.satusehatId;
+
+  const encounterUuid = `urn:uuid:${randomUUID()}`;
+  const encounterRef = satusehatEncounterId ? `Encounter/${satusehatEncounterId}` : encounterUuid;
+
+  const entries = [];
+
+  const encounterData = {
+    ...dataComplete,
+    statusKunjungan: dataComplete.statusKunjungan || 'SELESAI',
+    status: dataComplete.status || 'finished',
+    waktuDischarge: dataComplete.waktuDischarge || new Date().toISOString()
+  };
+
+  const encounterResource = buildEncounterPayload(encounterData, organizationId);
+
+  if (satusehatEncounterId) {
+    encounterResource.id = satusehatEncounterId;
+    entries.push({
+      fullUrl: `https://fhir.kemkes.go.id/r4/Encounter/${satusehatEncounterId}`,
+      resource: encounterResource,
+      request: {
+        method: "PUT",
+        url: `Encounter/${satusehatEncounterId}`
+      }
+    });
+  } else {
+    entries.push({
+      fullUrl: encounterUuid,
+      resource: encounterResource,
+      request: {
+        method: "POST",
+        url: "Encounter"
+      }
+    });
+  }
+
+  const pasienIhs = dataComplete.pasienIhs || dataComplete.pasien?.noIHS || dataComplete.pasien?.satusehat_ihs;
+  const pasienName = dataComplete.pasienName || dataComplete.pasien?.namaLengkap;
+  const dokterIhs = dataComplete.dokterIhs || dataComplete.dokter?.noIHS || dataComplete.dokter?.tenagaMedis?.noIHS;
+  const dokterName = dataComplete.dokterName || dataComplete.dokter?.namaLengkap;
+
+  const observations = dataComplete.observations || dataComplete.vitalSigns || [];
+  observations.forEach((obs) => {
+    const obsUuid = `urn:uuid:${randomUUID()}`;
+    const obsPayload = buildObservationPayload({
+      ...obs,
+      pasienIhs,
+      pasienName,
+      dokterIhs,
+      dokterName,
+      encounterId: satusehatEncounterId || encounterUuid.replace('urn:uuid:', '')
+    });
+
+    obsPayload.encounter = { reference: encounterRef };
+    if (pasienIhs) obsPayload.subject = { reference: formatRef('Patient', pasienIhs), display: pasienName };
+    if (dokterIhs) obsPayload.performer = [{ reference: formatRef('Practitioner', dokterIhs), display: dokterName }];
+
+    entries.push({
+      fullUrl: obsUuid,
+      resource: obsPayload,
+      request: {
+        method: "POST",
+        url: "Observation"
+      }
+    });
+  });
+
+  const diagnosisList = dataComplete.diagnosisList || dataComplete.diagnoses || dataComplete.diagnosis || [];
+  diagnosisList.forEach((diag) => {
+    const condUuid = `urn:uuid:${randomUUID()}`;
+    const condPayload = buildConditionPayload({
+      ...diag,
+      kodeIcd10: diag.kodeIcd10 || diag.icd10?.kode_icd10 || diag.kode_icd10,
+      namaDiagnosis: diag.namaDiagnosis || diag.icd10?.nama_diagnosis || diag.nama_diagnosis,
+      pasienIhs,
+      pasienName,
+      dokterIhs,
+      dokterName,
+      encounterId: satusehatEncounterId || encounterUuid.replace('urn:uuid:', '')
+    });
+
+    condPayload.encounter = { reference: encounterRef };
+    if (pasienIhs) condPayload.subject = { reference: formatRef('Patient', pasienIhs), display: pasienName };
+    if (dokterIhs) condPayload.recorder = { reference: formatRef('Practitioner', dokterIhs), display: dokterName };
+
+    entries.push({
+      fullUrl: condUuid,
+      resource: condPayload,
+      request: {
+        method: "POST",
+        url: "Condition"
+      }
+    });
+  });
+
+  const procedureList = dataComplete.procedureList || dataComplete.procedures || dataComplete.tindakans || [];
+  procedureList.forEach((proc) => {
+    const procUuid = `urn:uuid:${randomUUID()}`;
+    const procPayload = buildProcedurePayload({
+      ...proc,
+      tindakanId: proc.tindakanId || proc.id,
+      kodeIcd9: proc.kodeIcd9 || proc.icd9?.kode_icd9 || proc.kode_icd9,
+      namaProsedur: proc.namaProsedur || proc.icd9?.nama_prosedur || proc.nama_prosedur,
+      pasienIhs,
+      pasienName,
+      dokterIhs,
+      dokterName,
+      encounterId: satusehatEncounterId || encounterUuid.replace('urn:uuid:', '')
+    }, organizationId);
+
+    procPayload.encounter = { reference: encounterRef };
+    if (pasienIhs) procPayload.subject = { reference: formatRef('Patient', pasienIhs), display: pasienName };
+
+    entries.push({
+      fullUrl: procUuid,
+      resource: procPayload,
+      request: {
+        method: "POST",
+        url: "Procedure"
+      }
+    });
+  });
+
+  const resepDetails = dataComplete.resepDetails || dataComplete.resep || dataComplete.medications || [];
+  resepDetails.forEach((med) => {
+    const medUuid = `urn:uuid:${randomUUID()}`;
+    const medReqUuid = `urn:uuid:${randomUUID()}`;
+    const kfaCode = med.kfa_code || med.kodeObat || med.obat?.kfa_code || med.obat?.kodeObat;
+    const namaObat = med.namaObat || med.obat?.namaObat;
+
+    const medPayload = buildMedicationPayload({
+      ...med,
+      resepDetailId: med.resepDetailId || med.id,
+      kodeObat: kfaCode,
+      namaObat: namaObat,
+      sediaan: med.sediaan || med.obat?.sediaan
+    }, organizationId, medUuid);
+
+    entries.push({
+      fullUrl: medUuid,
+      resource: medPayload,
+      request: {
+        method: "POST",
+        url: "Medication"
+      }
+    });
+
+    const medReqPayload = buildMedicationRequestPayload({
+      ...med,
+      resepId: med.resepId,
+      resepDetailId: med.resepDetailId || med.id,
+      namaObat: namaObat,
+      pasienIhs,
+      pasienName,
+      dokterIhs,
+      dokterName,
+      encounterId: satusehatEncounterId || encounterUuid.replace('urn:uuid:', '')
+    }, medUuid, organizationId);
+
+    medReqPayload.medicationReference = { reference: medUuid, display: namaObat };
+    medReqPayload.encounter = { reference: encounterRef };
+    if (pasienIhs) medReqPayload.subject = { reference: formatRef('Patient', pasienIhs), display: pasienName };
+    if (dokterIhs) medReqPayload.requester = { reference: formatRef('Practitioner', dokterIhs), display: dokterName };
+
+    entries.push({
+      fullUrl: medReqUuid,
+      resource: medReqPayload,
+      request: {
+        method: "POST",
+        url: "MedicationRequest"
+      }
+    });
+  });
+
+  return {
+    resourceType: "Bundle",
+    type: "transaction",
+    entry: entries
+  };
+};
+
+module.exports = { toRawatJalanBundle };
+
+--- FILE: src\utils\fhir-mappers\clinical-impression.mapper.js ---
+
+const buildClinicalImpressionPayload = (data, orgId) => {
+  const dateStr = data.createdAt
+    ? new Date(data.createdAt).toISOString()
+    : new Date().toISOString();
+
+  return {
+    resourceType: "ClinicalImpression",
+    identifier: [
+      {
+        system: `http://sys-ids.kemkes.go.id/clinicalimpression/${orgId}`,
+        value: data.id
+      }
+    ],
+    status: data.status || "completed",
+    description: data.description || "Evaluasi klinis rawat jalan",
+    subject: {
+      reference: `Patient/${data.pasienIhs}`,
+      display: data.pasienName
+    },
+    encounter: {
+      reference: `Encounter/${data.encounterId}`
+    },
+    effectiveDateTime: dateStr,
+    date: dateStr,
+    assessor: {
+      reference: `Practitioner/${data.dokterIhs}`,
+      display: data.dokterName
+    },
+    summary: data.summary || "Pemeriksaan klinis rawat jalan",
+    ...(data.prognosisKode && {
+      prognosisCodeableConcept: [
+        {
+          coding: [
+            {
+              system: "http://snomed.info/sct",
+              code: data.prognosisKode,
+              display: data.prognosisDisplay || "Prognosis"
+            }
+          ]
+        }
+      ]
+    })
+  };
+};
+
+module.exports = { buildClinicalImpressionPayload };
+
+--- FILE: src\utils\fhir-mappers\composition.mapper.js ---
+
+const buildCompositionPayload = (data, orgId) => {
+  const dateStr = data.updatedAt || data.createdAt
+    ? new Date(data.updatedAt || data.createdAt).toISOString()
+    : new Date().toISOString();
+
+  return {
+    resourceType: "Composition",
+    identifier: {
+      system: `http://sys-ids.kemkes.go.id/composition/${orgId}`,
+      value: data.resumeMedisId || data.id
+    },
+    status: data.status || "final",
+    type: {
+      coding: [
+        {
+          system: "http://loinc.org",
+          code: data.typeCode || "11488-4",
+          display: "Consultation note"
+        }
+      ]
+    },
+    category: [
+      {
+        coding: [
+          {
+            system: "http://loinc.org",
+            code: "LP173421-1",
+            display: "Report"
+          }
+        ]
+      }
+    ],
+    subject: {
+      reference: `Patient/${data.pasienIhs}`,
+      display: data.pasienName
+    },
+    encounter: {
+      reference: `Encounter/${data.encounterId}`
+    },
+    date: dateStr,
+    author: [
+      {
+        reference: `Practitioner/${data.dokterIhs}`,
+        display: data.dokterName
+      }
+    ],
+    title: data.title || "Resume Medis Pasien",
+    custodian: {
+      reference: `Organization/${orgId}`
+    },
+    section: [
+      {
+        title: "Riwayat Keluhan & Ringkasan Klinis",
+        code: {
+          coding: [
+            {
+              system: "http://loinc.org",
+              code: "11329-0",
+              display: "History of General health Narrative"
+            }
+          ]
+        },
+        text: {
+          status: "generated",
+          div: `<div xmlns="http://www.w3.org/1999/xhtml">${data.ringkasanKlinis || "Tidak ada ringkasan"}</div>`
+        }
+      },
+      {
+        title: "Instruksi Tindak Lanjut",
+        code: {
+          coding: [
+            {
+              system: "http://loinc.org",
+              code: "28574-2",
+              display: "Discharge instructions instructions"
+            }
+          ]
+        },
+        text: {
+          status: "generated",
+          div: `<div xmlns="http://www.w3.org/1999/xhtml">${data.instruksiTindakLanjut || "Kontrol sesuai petunjuk dokter"}</div>`
+        }
+      }
+    ]
+  };
+};
+
+module.exports = { buildCompositionPayload };
+
 --- FILE: src\utils\fhir-mappers\condition.mapper.js ---
 const buildConditionPayload = (data) => {
 
@@ -9809,8 +10572,32 @@ const buildConditionPayload = (data) => {
 module.exports = { buildConditionPayload };
 
 --- FILE: src\utils\fhir-mappers\encounter.mapper.js ---
+
+const formatReference = (prefix, id) => {
+  if (!id) return undefined;
+  if (id.startsWith('urn:uuid:') || id.startsWith(`${prefix}/`)) {
+    return id;
+  }
+  return `${prefix}/${id}`;
+};
+
 const buildEncounterPayload = (data, orgId) => {
-  const startEncounter = new Date().toISOString();
+
+  const startEncounter = data.tanggalRegistrasi
+    ? new Date(data.tanggalRegistrasi).toISOString()
+    : new Date().toISOString();
+
+  const statusMap = {
+    'MENUNGGU': 'arrived',
+    'DIPERIKSA': 'in-progress',
+    'SELESAI': 'finished',
+    'BATAL': 'cancelled'
+  };
+  const fhirStatus = data.status || statusMap[data.statusKunjungan] || 'arrived';
+
+  const endEncounter = data.waktuDischarge
+    ? new Date(data.waktuDischarge).toISOString()
+    : (fhirStatus === 'finished' ? new Date().toISOString() : undefined);
 
   let classCode = "AMB";
   let classDisplay = "ambulatory";
@@ -9826,16 +10613,27 @@ const buildEncounterPayload = (data, orgId) => {
     }
   }
 
-  return {
+  const payload = {
     resourceType: "Encounter",
-    status: "arrived",
+    status: fhirStatus,
     class: {
       system: "http://terminology.hl7.org/CodeSystem/v3-ActCode",
       code: classCode,
       display: classDisplay
     },
+    ...(data.layananTujuan && {
+      serviceType: {
+        coding: [
+          {
+            system: "http://terminology.hl7.org/CodeSystem/service-type",
+            code: "124",
+            display: data.layananTujuan
+          }
+        ]
+      }
+    }),
     subject: {
-      reference: `Patient/${data.pasienIhs}`,
+      reference: formatReference("Patient", data.pasienIhs),
       display: data.pasienName
     },
     participant: [
@@ -9852,43 +10650,115 @@ const buildEncounterPayload = (data, orgId) => {
           }
         ],
         individual: {
-          reference: `Practitioner/${data.dokterIhs}`,
+          reference: formatReference("Practitioner", data.dokterIhs),
           display: data.dokterName
         }
       }
     ],
     period: {
-      start: startEncounter
+      start: startEncounter,
+      ...(endEncounter && { end: endEncounter })
     },
     statusHistory: [
       {
-        status: "arrived",
+        status: fhirStatus,
         period: {
-          start: startEncounter
+          start: startEncounter,
+          ...(endEncounter && { end: endEncounter })
         }
       }
     ],
     location: [
       {
         location: {
-          reference: `Location/${data.poliIhs}`,
+          reference: formatReference("Location", data.poliIhs),
           display: data.poliName
         }
       }
     ],
     serviceProvider: {
-      reference: `Organization/${orgId}`
+      reference: formatReference("Organization", orgId)
     },
     identifier: [
       {
         system: `http://sys-ids.kemkes.go.id/encounter/${orgId}`,
-        value: data.noKunjungan
+        value: data.noKunjungan || data.id
       }
     ]
   };
+
+  if (data.conditionSatusehatId) {
+    payload.diagnosis = [
+      {
+        condition: {
+          reference: formatReference("Condition", data.conditionSatusehatId)
+        },
+        use: {
+          coding: [
+            {
+              system: "http://terminology.hl7.org/CodeSystem/diagnosis-role",
+              code: "DD",
+              display: "Discharge diagnosis"
+            }
+          ]
+        },
+        rank: data.rankDiagnosis || 1
+      }
+    ];
+  }
+
+  if (data.caraKeluar || data.kondisiDischarge || fhirStatus === 'finished') {
+    payload.hospitalization = {
+      dischargeDisposition: {
+        coding: [
+          {
+            system: "http://terminology.hl7.org/CodeSystem/discharge-disposition",
+            code: data.caraKeluar === 'RUJUK' ? 'other-hcf' : 'home',
+            display: data.kondisiDischarge || 'Discharged to home'
+          }
+        ]
+      }
+    };
+  }
+
+  return payload;
 };
 
 module.exports = { buildEncounterPayload };
+
+--- FILE: src\utils\fhir-mappers\index.js ---
+const { buildLocationPayload } = require('./location.mapper');
+const { buildEncounterPayload } = require('./encounter.mapper');
+const { buildObservationPayload } = require('./observation.mapper');
+const { buildConditionPayload } = require('./condition.mapper');
+const { buildMedicationPayload, buildMedicationRequestPayload } = require('./medication.mapper');
+const { buildProcedurePayload } = require('./procedure.mapper');
+const { buildAllergyPayload } = require('./allergy.mapper');
+const { buildMedicationDispensePayload } = require('./medication-dispense.mapper');
+const { buildPatientPayload } = require('./patient.mapper');
+const { buildCompositionPayload } = require('./composition.mapper');
+const { buildClinicalImpressionPayload } = require('./clinical-impression.mapper');
+const { buildServiceRequestPayload } = require('./service-request.mapper');
+const { buildSpecimenPayload } = require('./specimen.mapper');
+const { toRawatJalanBundle } = require('./bundle.mapper');
+
+module.exports = {
+  buildLocationPayload,
+  buildEncounterPayload,
+  buildObservationPayload,
+  buildConditionPayload,
+  buildMedicationPayload,
+  buildMedicationRequestPayload,
+  buildProcedurePayload,
+  buildAllergyPayload,
+  buildMedicationDispensePayload,
+  buildPatientPayload,
+  buildCompositionPayload,
+  buildClinicalImpressionPayload,
+  buildServiceRequestPayload,
+  buildSpecimenPayload,
+  toRawatJalanBundle
+};
 
 --- FILE: src\utils\fhir-mappers\location.mapper.js ---
 const buildLocationPayload = (poliklinik, orgId) => {
@@ -10125,6 +10995,10 @@ const buildMedicationPayload = (data, orgId, uniqueId = null) => {
 };
 
 const buildMedicationRequestPayload = (data, medicationId, orgId) => {
+  const authoredDate = data.tanggalResep
+    ? new Date(data.tanggalResep).toISOString()
+    : new Date().toISOString();
+
   return {
     resourceType: "MedicationRequest",
     identifier: [
@@ -10139,7 +11013,7 @@ const buildMedicationRequestPayload = (data, medicationId, orgId) => {
         value: data.resepDetailId
       }
     ],
-    status: "completed",
+    status: data.status === 'SELESAI' ? 'completed' : 'active',
     intent: "order",
     category: [
       {
@@ -10164,15 +11038,53 @@ const buildMedicationRequestPayload = (data, medicationId, orgId) => {
     encounter: {
       reference: `Encounter/${data.encounterId}`
     },
-    authoredOn: new Date().toISOString(),
+    authoredOn: authoredDate,
     requester: {
       reference: `Practitioner/${data.dokterIhs}`,
       display: data.dokterName
     },
+    ...(data.catatan && {
+      note: [{ text: data.catatan }]
+    }),
     dosageInstruction: [
       {
         sequence: 1,
-        text: data.aturanPakai
+        text: data.aturanPakai,
+        timing: {
+          repeat: {
+            frequency: data.frekuensi || 3,
+            period: 1,
+            periodUnit: "d"
+          }
+        },
+        route: {
+          coding: [
+            {
+              system: "http://www.whocc.no/atc",
+              code: data.rutePemberian || "O",
+              display: "Oral"
+            }
+          ]
+        },
+        doseAndRate: [
+          {
+            type: {
+              coding: [
+                {
+                  system: "http://terminology.hl7.org/CodeSystem/dose-rate-type",
+                  code: "ordered",
+                  display: "Ordered"
+                }
+              ]
+            },
+            doseQuantity: {
+              value: data.dosisAngka || 1,
+              unit: data.dosisSatuan || "TAB",
+              system: "http://terminology.hl7.org/CodeSystem/v3-orderableDrugForm",
+              code: data.dosisSatuan || "TAB"
+            }
+          }
+        ]
       }
     ],
     dispenseRequest: {
@@ -10183,13 +11095,13 @@ const buildMedicationRequestPayload = (data, medicationId, orgId) => {
         code: "d"
       },
       validityPeriod: {
-        start: new Date().toISOString(),
-        end: new Date(new Date().getTime() + 30*24*60*60*1000).toISOString()
+        start: authoredDate,
+        end: new Date(new Date(authoredDate).getTime() + 30*24*60*60*1000).toISOString()
       },
       numberOfRepeatsAllowed: 0,
       quantity: {
         value: data.jumlah,
-        unit: "TAB",
+        unit: data.sediaan || "TAB",
         system: "http://terminology.hl7.org/CodeSystem/v3-orderableDrugForm",
         code: "TAB"
       },
@@ -10204,6 +11116,7 @@ const buildMedicationRequestPayload = (data, medicationId, orgId) => {
 };
 
 module.exports = { buildMedicationPayload, buildMedicationRequestPayload };
+
 
 --- FILE: src\utils\fhir-mappers\observation.mapper.js ---
 const buildObservationPayload = (data) => {
@@ -10264,6 +11177,234 @@ const buildObservationPayload = (data) => {
 
 module.exports = { buildObservationPayload };
 
+--- FILE: src\utils\fhir-mappers\patient.mapper.js ---
+
+const buildPatientPayload = (data = {}, orgId) => {
+  const pasien = data.pasien || data;
+
+  let gender = "unknown";
+  const rawGender = pasien.jenisKelamin || data.jenisKelamin;
+  if (rawGender) {
+    const jk = rawGender.toString().toLowerCase();
+    if (jk === "laki-laki" || jk === "l" || jk === "male" || jk === "laki_laki") gender = "male";
+    else if (jk === "perempuan" || jk === "p" || jk === "female") gender = "female";
+  }
+
+  const tglLahir = pasien.tanggalLahir || data.tanggalLahir;
+  const birthDate = tglLahir ? new Date(tglLahir).toISOString().split('T')[0] : undefined;
+
+  let maritalStatusCode = "U";
+  let maritalStatusDisplay = "unmarried";
+  const stPerkawinan = pasien.statusPerkawinan || data.statusPerkawinan;
+  if (stPerkawinan) {
+    const st = stPerkawinan.toLowerCase();
+    if (st === "belum kawin" || st === "unmarried") {
+      maritalStatusCode = "U";
+      maritalStatusDisplay = "unmarried";
+    } else if (st.includes("cerai mati")) {
+      maritalStatusCode = "W";
+      maritalStatusDisplay = "widowed";
+    } else if (st.includes("cerai")) {
+      maritalStatusCode = "D";
+      maritalStatusDisplay = "divorced";
+    } else if (st.includes("kawin") || st.includes("menikah") || st === "married") {
+      maritalStatusCode = "M";
+      maritalStatusDisplay = "Married";
+    }
+  }
+
+  const identifier = [];
+  const isBayi = pasien.isBayi || data.isBayi;
+  const nikIbu = pasien.nikIbu || data.nikIbu;
+  const nik = pasien.nik || data.nik;
+  const noKk = pasien.noKk || data.noKk;
+  const noRM = pasien.noRM || data.noRM;
+  const noIHS = pasien.noIHS || data.noIHS;
+  const noPaspor = pasien.noPaspor || data.noPaspor;
+
+  if (isBayi && nikIbu) {
+    identifier.push({
+      use: "official",
+      system: "https://fhir.kemkes.go.id/id/nik-ibu",
+      value: nikIbu
+    });
+  } else if (nik) {
+    identifier.push({
+      use: "official",
+      system: "https://fhir.kemkes.go.id/id/nik",
+      value: nik
+    });
+  }
+
+  if (noRM && orgId) {
+    identifier.push({
+      use: "official",
+      system: `http://sys-ids.kemkes.go.id/mr-number/${orgId}`,
+      value: noRM
+    });
+  }
+
+  if (noIHS) {
+    identifier.push({
+      use: "official",
+      system: "https://fhir.kemkes.go.id/id/ihs-number",
+      value: noIHS
+    });
+  }
+
+  if (noPaspor) {
+    identifier.push({
+      use: "official",
+      system: "https://fhir.kemkes.go.id/id/paspor",
+      value: noPaspor
+    });
+  }
+
+  if (noKk) {
+    identifier.push({
+      use: "official",
+      system: "https://fhir.kemkes.go.id/id/kk",
+      value: noKk
+    });
+  }
+
+  let addressLine = pasien.alamat?.alamatDomisili || pasien.alamat?.alamatKtp || data.alamatKtp || data.alamat || "";
+  const rtRw = data.rtRw || (data.rt && data.rw ? `${data.rt}/${data.rw}` : undefined);
+  if (rtRw) addressLine += ` RT/RW ${rtRw}`;
+  const desa = data.desaKelurahan || data.desa;
+  if (desa) addressLine += ` Kel. ${desa}`;
+  const kec = pasien.alamat?.kecamatan || data.kecamatan;
+  if (kec) addressLine += ` Kec. ${kec}`;
+
+  const addressObj = {
+    use: "home",
+    country: pasien.kewarganegaraan || data.kewarganegaraan || "ID"
+  };
+
+  if (addressLine.trim()) addressObj.line = [addressLine.trim()];
+  const kabKota = pasien.alamat?.kabupatenKota || data.kabupatenKota || data.city;
+  if (kabKota) addressObj.city = kabKota;
+  if (kec) addressObj.district = kec;
+  if (data.provinsi) addressObj.state = data.provinsi;
+  const kodePos = pasien.alamat?.kodePos || data.kodePos;
+  if (kodePos) addressObj.postalCode = kodePos;
+
+  if (data.kodeProvinsi && data.kodeKabupaten && data.kodeKecamatan && data.kodeDesa) {
+    addressObj.extension = [
+      {
+        url: "https://fhir.kemkes.go.id/r4/StructureDefinition/administrativeCode",
+        extension: [
+          { url: "province", valueCode: data.kodeProvinsi },
+          { url: "city", valueCode: data.kodeKabupaten },
+          { url: "district", valueCode: data.kodeKecamatan.substring(0, 6) },
+          { url: "village", valueCode: data.kodeDesa.length > 10 ? data.kodeDesa.substring(0, 10) : data.kodeDesa },
+          { url: "rt", valueCode: data.rt || "001" },
+          { url: "rw", valueCode: data.rw || "001" }
+        ]
+      }
+    ];
+  }
+
+  const telecom = [];
+  const phoneValue = pasien.kontak?.noHp || data.noHp || data.kontakDarurat;
+  if (phoneValue && phoneValue !== '-') {
+    telecom.push({
+      system: "phone",
+      value: phoneValue,
+      use: "mobile"
+    });
+  }
+
+  let contact = undefined;
+  const namaIbu = (isBayi && data.namaIbu) || pasien.namaIbuKandung || data.namaIbuKandung;
+  if (namaIbu) {
+    contact = [
+      {
+        relationship: [
+          {
+            coding: [
+              {
+                system: "http://terminology.hl7.org/CodeSystem/v2-0131",
+                code: "N",
+                display: "Next-of-Kin"
+              }
+            ]
+          }
+        ],
+        name: {
+          use: "official",
+          text: namaIbu
+        }
+      }
+    ];
+  }
+
+  const extensions = [];
+  const tempatLahir = pasien.tempatLahir || data.tempatLahir;
+  if (tempatLahir) {
+    extensions.push({
+      url: "https://fhir.kemkes.go.id/r4/StructureDefinition/birthPlace",
+      valueAddress: {
+        city: tempatLahir
+      }
+    });
+  }
+
+  const namaLengkap = pasien.namaLengkap || data.namaLengkap || data.nama;
+
+  const payload = {
+    resourceType: "Patient",
+    meta: {
+      profile: [
+        "https://fhir.kemkes.go.id/r4/StructureDefinition/Patient"
+      ]
+    },
+    identifier: identifier,
+    active: true,
+    name: [
+      {
+        use: "official",
+        text: namaLengkap
+      }
+    ],
+    gender: gender,
+    birthDate: birthDate,
+    ...(extensions.length > 0 && { extension: extensions }),
+    ...(addressObj.line || addressObj.city ? { address: [addressObj] } : {}),
+    ...(telecom.length > 0 && { telecom: telecom }),
+    ...(contact && { contact: contact }),
+    multipleBirthInteger: data.multipleBirthInteger || 0,
+    maritalStatus: {
+      coding: [
+        {
+          system: "http://terminology.hl7.org/CodeSystem/v3-MaritalStatus",
+          code: maritalStatusCode,
+          display: maritalStatusDisplay
+        }
+      ],
+      text: stPerkawinan || maritalStatusDisplay
+    },
+    communication: [
+      {
+        language: {
+          coding: [
+            {
+              system: "urn:ietf:bcp:47",
+              code: pasien.bahasa || data.bahasa || "id",
+              display: "Indonesian"
+            }
+          ]
+        },
+        preferred: true
+      }
+    ]
+  };
+
+  return payload;
+};
+
+module.exports = { buildPatientPayload };
+
 --- FILE: src\utils\fhir-mappers\procedure.mapper.js ---
 const buildProcedurePayload = (data, orgId) => {
   return {
@@ -10317,3 +11458,156 @@ const buildProcedurePayload = (data, orgId) => {
 };
 
 module.exports = { buildProcedurePayload };
+
+--- FILE: src\utils\fhir-mappers\service-request.mapper.js ---
+
+const buildServiceRequestPayload = (data, orgId, type = "LAB") => {
+  const categoryCode = type === "LAB" ? "108252007" : "363679005";
+  const categoryDisplay = type === "LAB" ? "Laboratory procedure" : "Imaging";
+  const dateStr = data.tanggalOrder
+    ? new Date(data.tanggalOrder).toISOString()
+    : new Date().toISOString();
+
+  return {
+    resourceType: "ServiceRequest",
+    identifier: [
+      {
+        system: `http://sys-ids.kemkes.go.id/servicerequest/${orgId}`,
+        value: data.orderId || data.id
+      }
+    ],
+    status: "active",
+    intent: data.intent || "original-order",
+    priority: data.priority || "routine",
+    category: [
+      {
+        coding: [
+          {
+            system: "http://snomed.info/sct",
+            code: categoryCode,
+            display: categoryDisplay
+          }
+        ]
+      }
+    ],
+    code: {
+      coding: [
+        {
+          system: type === "LAB" ? "http://loinc.org" : "http://snomed.info/sct",
+          code: data.requestCode || (type === "LAB" ? "48767-8" : "363679005"),
+          display: data.requestDisplay || (type === "LAB" ? "Pemeriksaan Laboratorium" : "Pemeriksaan Radiologi")
+        }
+      ]
+    },
+    subject: {
+      reference: `Patient/${data.pasienIhs}`,
+      display: data.pasienName
+    },
+    encounter: {
+      reference: `Encounter/${data.encounterId}`
+    },
+    authoredOn: dateStr,
+    requester: {
+      reference: `Practitioner/${data.dokterIhs}`,
+      display: data.dokterName
+    },
+    ...(data.catatanKlinis && {
+      note: [{ text: data.catatanKlinis }]
+    })
+  };
+};
+
+module.exports = { buildServiceRequestPayload };
+
+--- FILE: src\utils\fhir-mappers\specimen.mapper.js ---
+
+const buildSpecimenPayload = (data, orgId) => {
+  const collectionDate = data.waktuPengambilan
+    ? new Date(data.waktuPengambilan).toISOString()
+    : new Date().toISOString();
+
+  return {
+    resourceType: "Specimen",
+    identifier: [
+      {
+        system: `http://sys-ids.kemkes.go.id/specimen/${orgId}`,
+        value: data.id
+      }
+    ],
+    status: data.kondisiSpesimen === "autolyzed" ? "entered-in-error" : "available",
+    type: {
+      coding: [
+        {
+          system: "http://snomed.info/sct",
+          code: data.jenisSpesimenKode || "119294007",
+          display: data.jenisSpesimenNama || "Blood sample"
+        }
+      ]
+    },
+    subject: {
+      reference: `Patient/${data.pasienIhs}`,
+      display: data.pasienName
+    },
+    request: [
+      {
+        reference: `ServiceRequest/${data.serviceRequestId}`
+      }
+    ],
+    collection: {
+      collector: data.collectorIhs ? {
+        reference: `Practitioner/${data.collectorIhs}`,
+        display: data.collectorName
+      } : undefined,
+      collectedDateTime: collectionDate,
+      ...(data.volume && {
+        quantity: {
+          value: data.volume,
+          unit: data.satuanVolume || "mL"
+        }
+      }),
+      ...(data.statusPuasa && {
+        fastingStatusCodeableConcept: {
+          coding: [
+            {
+              system: "http://terminology.hl7.org/CodeSystem/v2-0916",
+              code: "F",
+              display: "Patient was fasting prior to the procedure."
+            }
+          ]
+        }
+      }),
+      ...(data.metodePengambilan && {
+        method: {
+          coding: [
+            {
+              system: "http://snomed.info/sct",
+              code: data.metodePengambilan,
+              display: "Specimen collection method"
+            }
+          ]
+        }
+      })
+    },
+    ...(data.prosedurFiksasi && {
+      processing: [
+        {
+          procedure: {
+            coding: [
+              {
+                system: "http://snomed.info/sct",
+                code: data.prosedurFiksasi,
+                display: "Fixation procedure"
+              }
+            ]
+          },
+          timeDateTime: data.waktuFiksasi ? new Date(data.waktuFiksasi).toISOString() : collectionDate
+        }
+      ]
+    }),
+    ...(data.catatan && {
+      note: [{ text: data.catatan }]
+    })
+  };
+};
+
+module.exports = { buildSpecimenPayload };

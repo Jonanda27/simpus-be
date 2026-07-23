@@ -1,12 +1,19 @@
+/**
+ * Helper to ensure standard reference string
+ */
+const formatReference = (prefix, id) => {
+  if (!id) return undefined;
+  if (id.startsWith('urn:uuid:') || id.startsWith(`${prefix}/`)) {
+    return id;
+  }
+  return `${prefix}/${id}`;
+};
+
 const buildEncounterPayload = (data, orgId) => {
   // Use actual registration timestamp (ISO-8601 UTC)
   const startEncounter = data.tanggalRegistrasi 
     ? new Date(data.tanggalRegistrasi).toISOString() 
     : new Date().toISOString();
-
-  const endEncounter = data.waktuDischarge 
-    ? new Date(data.waktuDischarge).toISOString() 
-    : undefined;
 
   // Dynamic status mapping
   const statusMap = {
@@ -15,7 +22,11 @@ const buildEncounterPayload = (data, orgId) => {
     'SELESAI': 'finished',
     'BATAL': 'cancelled'
   };
-  const fhirStatus = statusMap[data.statusKunjungan] || 'arrived';
+  const fhirStatus = data.status || statusMap[data.statusKunjungan] || 'arrived';
+
+  const endEncounter = data.waktuDischarge 
+    ? new Date(data.waktuDischarge).toISOString() 
+    : (fhirStatus === 'finished' ? new Date().toISOString() : undefined);
 
   // Map Jenis Pelayanan lokal ke FHIR Class
   let classCode = "AMB"; // Default Ambulatory (Rawat Jalan)
@@ -52,7 +63,7 @@ const buildEncounterPayload = (data, orgId) => {
       }
     }),
     subject: {
-      reference: `Patient/${data.pasienIhs}`,
+      reference: formatReference("Patient", data.pasienIhs),
       display: data.pasienName
     },
     participant: [
@@ -69,7 +80,7 @@ const buildEncounterPayload = (data, orgId) => {
           }
         ],
         individual: {
-          reference: `Practitioner/${data.dokterIhs}`,
+          reference: formatReference("Practitioner", data.dokterIhs),
           display: data.dokterName
         }
       }
@@ -90,18 +101,18 @@ const buildEncounterPayload = (data, orgId) => {
     location: [
       {
         location: {
-          reference: `Location/${data.poliIhs}`,
+          reference: formatReference("Location", data.poliIhs),
           display: data.poliName
         }
       }
     ],
     serviceProvider: {
-      reference: `Organization/${orgId}`
+      reference: formatReference("Organization", orgId)
     },
     identifier: [
       {
         system: `http://sys-ids.kemkes.go.id/encounter/${orgId}`,
-        value: data.noKunjungan
+        value: data.noKunjungan || data.id
       }
     ]
   };
@@ -111,7 +122,7 @@ const buildEncounterPayload = (data, orgId) => {
     payload.diagnosis = [
       {
         condition: {
-          reference: `Condition/${data.conditionSatusehatId}`
+          reference: formatReference("Condition", data.conditionSatusehatId)
         },
         use: {
           coding: [
@@ -128,7 +139,7 @@ const buildEncounterPayload = (data, orgId) => {
   }
 
   // Hospitalization / Discharge Disposition
-  if (data.caraKeluar || data.kondisiDischarge) {
+  if (data.caraKeluar || data.kondisiDischarge || fhirStatus === 'finished') {
     payload.hospitalization = {
       dischargeDisposition: {
         coding: [
@@ -146,4 +157,3 @@ const buildEncounterPayload = (data, orgId) => {
 };
 
 module.exports = { buildEncounterPayload };
-

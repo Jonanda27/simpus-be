@@ -56,6 +56,7 @@ model Pasien {
   id              String      @id @default(cuid())
   noRM            String      @unique
   noIHS           String?     @unique
+  satusehat_ihs   String?
   nik             String      @unique
   noKk            String?
   noPaspor        String?
@@ -215,6 +216,9 @@ model Kunjungan {
   noSep             String?
   encounterId       String?     // ID Encounter dari SATUSEHAT
   satusehatSync     Json?       // Tracking sinkronisasi SATUSEHAT
+  satusehat_encounter_id String?
+  satusehat_sync_status  String   @default("PENDING")
+  satusehat_last_error    String?  @db.Text
 
   // ==========================================
   // KOLOM BRIDGING BPJS PCARE (Anti-Corruption Layer)
@@ -582,6 +586,7 @@ model LayananKlinik {
 model MasterObat {
   id              String      @id @default(cuid())
   kodeObat        String      @unique
+  kfa_code        String?
   namaObat        String
   kategori        String      // Obat Bebas, Obat Keras, Narkotika, dll
   sediaan         String      // Tablet, Kapsul, Sirup, Injeksi, Salep
