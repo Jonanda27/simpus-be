@@ -11,6 +11,7 @@ router.get('/screening', kunjunganController.getKunjunganScreening);
 router.get('/dashboard-stats', kunjunganController.getDashboardStats);
 router.get('/perawat/dashboard-stats', kunjunganController.getPerawatDashboardStats);
 router.get('/dokter/dashboard-stats', kunjunganController.getDokterDashboardStats);
+router.get('/:id/fhir-preview', kunjunganController.getKunjunganFhirPreview);
 router.get('/:id', kunjunganController.getKunjunganById);
 router.post('/:id/panggil', kunjunganController.panggilKunjungan);
 router.put('/:id/status', kunjunganController.updateStatusKunjungan);

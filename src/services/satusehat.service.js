@@ -389,8 +389,10 @@ const postMedicationDispense = async (data) => {
     const medResponse = await fhirClient.post('/Medication', medicationPayload);
     medicationId = medResponse.data.id;
   } catch (error) {
+    const issue = error.response?.data?.issue?.[0];
+    const diag = issue?.diagnostics || issue?.details?.text || issue?.details?.coding?.[0]?.display || error.message;
     console.error(`[SATUSEHAT] Error creating Medication (Dispense) untuk ${data.kodeObat}:`, error.response?.data ? JSON.stringify(error.response?.data, null, 2) : error.message);
-    throw new Error(error.response?.data?.issue?.[0]?.diagnostics || 'Terjadi kesalahan saat mengirim Medication (Dispense) ke SATUSEHAT');
+    throw new Error(`SATUSEHAT Error: ${diag}`);
   }
 
   // 2. Kirim MedicationDispense (Penyerahan)
@@ -405,8 +407,33 @@ const postMedicationDispense = async (data) => {
       medicationDispenseId: response.data.id
     };
   } catch (error) {
+    const issue = error.response?.data?.issue?.[0];
+    const diag = issue?.diagnostics || issue?.details?.text || issue?.details?.coding?.[0]?.display || error.message;
     console.error(`[SATUSEHAT] Error creating MedicationDispense untuk ${data.kodeObat}:`, error.response?.data ? JSON.stringify(error.response?.data, null, 2) : error.message);
-    throw new Error(error.response?.data?.issue?.[0]?.diagnostics || 'Terjadi kesalahan saat mengirim MedicationDispense ke SATUSEHAT');
+    throw new Error(`SATUSEHAT Error: ${diag}`);
+  }
+};
+
+/**
+ * Mengirim Pengkajian Resep Apoteker (QuestionnaireResponse) ke SATUSEHAT
+ * @param {Object} data - payload pengkajian resep
+ */
+const createQuestionnaireResponse = async (data) => {
+  try {
+    const fhirClient = await createFhirClient();
+    const payload = buildQuestionnaireResponsePayload(data);
+
+    console.log("[SATUSEHAT] Mengirim QuestionnaireResponse Payload:", JSON.stringify(payload, null, 2));
+
+    const response = await fhirClient.post('/QuestionnaireResponse', payload);
+    return {
+      success: true,
+      data: response.data,
+      questionnaireResponseId: response.data.id
+    };
+  } catch (error) {
+    console.error(`[SATUSEHAT] Error creating QuestionnaireResponse:`, error.response?.data ? JSON.stringify(error.response?.data, null, 2) : error.message);
+    throw new Error(error.response?.data?.issue?.[0]?.diagnostics || 'Terjadi kesalahan saat mengirim QuestionnaireResponse ke SATUSEHAT');
   }
 };
 
@@ -424,5 +451,6 @@ module.exports = {
   createProcedure,
   createAllergyIntolerance,
   searchKFA,
-  postMedicationDispense
+  postMedicationDispense,
+  createQuestionnaireResponse
 };

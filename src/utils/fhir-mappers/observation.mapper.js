@@ -55,4 +55,43 @@ const buildObservationPayload = (data) => {
   return payload;
 };
 
-module.exports = { buildObservationPayload };
+/**
+ * Build Observation Payload untuk Pemeriksaan Fisik Head to Toe (Category: exam)
+ */
+const buildPhysicalExamObservationPayload = (data) => {
+  return {
+    resourceType: "Observation",
+    status: "final",
+    category: [
+      {
+        coding: [
+          {
+            system: "http://terminology.hl7.org/CodeSystem/observation-category",
+            code: "exam",
+            display: "Exam"
+          }
+        ]
+      }
+    ],
+    code: {
+      coding: [
+        {
+          system: "http://loinc.org",
+          code: data.loincCode || "29545-1",
+          display: data.organName || "Physical findings"
+        }
+      ]
+    },
+    subject: {
+      reference: `Patient/${data.pasienIhs}`,
+      display: data.pasienName
+    },
+    encounter: {
+      reference: `Encounter/${data.encounterId}`
+    },
+    effectiveDateTime: data.effectiveDateTime || new Date().toISOString(),
+    valueString: data.hasilPemeriksaan
+  };
+};
+
+module.exports = { buildObservationPayload, buildPhysicalExamObservationPayload };

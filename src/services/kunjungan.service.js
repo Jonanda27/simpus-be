@@ -446,7 +446,11 @@ const getKunjunganFhirPreview = async (id) => {
 
   const { pasien, screening, rekamMedis, rujukanKeluar, orderLab, diagnosis, tindakans, resep, poliklinik, dokterTujuan } = kunjungan;
   
+<<<<<<< Updated upstream
   // Construct FHIR Bundle
+=======
+  // Construct FHIR Bundle Collection
+>>>>>>> Stashed changes
   const bundle = {
     resourceType: "Bundle",
     type: "collection",
@@ -474,6 +478,23 @@ const getKunjunganFhirPreview = async (id) => {
     gender: pasien.jenisKelamin === 'Laki-laki' ? 'male' : 'female',
     birthDate: pasien.tanggalLahir ? new Date(pasien.tanggalLahir).toISOString().split('T')[0] : null
   };
+<<<<<<< Updated upstream
+=======
+
+  if (pasien.alamat) {
+    patientResource.address = [
+      {
+        use: "home",
+        line: [pasien.alamat.alamatDomisili || pasien.alamat.alamatKtp],
+        city: pasien.alamat.kabupatenKota,
+        district: pasien.alamat.kecamatan,
+        state: pasien.alamat.provinsi,
+        postalCode: pasien.alamat.kodePos,
+        country: "ID"
+      }
+    ];
+  }
+>>>>>>> Stashed changes
   bundle.entry.push({ resource: patientResource });
 
   // 2. Encounter Resource
@@ -490,9 +511,15 @@ const getKunjunganFhirPreview = async (id) => {
     ? new Date(kunjungan.waktuPemeriksaanSelesai).toISOString() 
     : new Date(kunjungan.updatedAt).toISOString();
 
+<<<<<<< Updated upstream
   // Map discharge disposition if available
   let dischargeDisp = undefined;
   if (kunjungan.statusPulang === 'DIRUJUK_RS') {
+=======
+  const statusPulang = kunjungan.statusPulang || kunjungan.caraKeluar;
+  let dischargeDisp = undefined;
+  if (statusPulang === 'DIRUJUK_RS') {
+>>>>>>> Stashed changes
     dischargeDisp = {
       coding: [
         {
@@ -503,7 +530,11 @@ const getKunjunganFhirPreview = async (id) => {
       ],
       text: "Dirujuk ke Rumah Sakit"
     };
+<<<<<<< Updated upstream
   } else if (kunjungan.statusPulang === 'RAWAT_INAP') {
+=======
+  } else if (statusPulang === 'RAWAT_INAP') {
+>>>>>>> Stashed changes
     dischargeDisp = {
       coding: [
         {
@@ -514,7 +545,11 @@ const getKunjunganFhirPreview = async (id) => {
       ],
       text: "Rawat Inap"
     };
+<<<<<<< Updated upstream
   } else if (kunjungan.statusPulang === 'KONTROL_ULANG') {
+=======
+  } else if (statusPulang === 'KONTROL_ULANG') {
+>>>>>>> Stashed changes
     dischargeDisp = {
       coding: [
         {
@@ -754,7 +789,50 @@ const getKunjunganFhirPreview = async (id) => {
     }
   }
 
+<<<<<<< Updated upstream
   // 4. Condition Resource (Diagnosa ICD-10)
+=======
+  // 4. Observation Resource (Exam Physical Head to Toe dari RekamMedis)
+  if (rekamMedis && rekamMedis.pemeriksaanFisik) {
+    const examObservationResource = {
+      resourceType: "Observation",
+      id: `obs-exam-${rekamMedis.id}`,
+      status: "final",
+      category: [
+        {
+          coding: [
+            {
+              system: "http://terminology.hl7.org/CodeSystem/observation-category",
+              code: "exam",
+              display: "Exam"
+            }
+          ]
+        }
+      ],
+      code: {
+        coding: [
+          {
+            system: "http://loinc.org",
+            code: "29545-1",
+            display: "Physical findings"
+          }
+        ]
+      },
+      subject: {
+        reference: `Patient/${pasien.noIHS || pasien.id}`,
+        display: pasien.namaLengkap
+      },
+      encounter: {
+        reference: `Encounter/${kunjungan.satusehatId || kunjungan.id}`
+      },
+      effectiveDateTime: new Date(rekamMedis.createdAt).toISOString(),
+      valueString: rekamMedis.pemeriksaanFisik
+    };
+    bundle.entry.push({ resource: examObservationResource });
+  }
+
+  // 5. Condition Resource (Diagnosa ICD-10)
+>>>>>>> Stashed changes
   if (diagnosis && diagnosis.length > 0) {
     for (const d of diagnosis) {
       if (d.icd10) {
@@ -810,7 +888,11 @@ const getKunjunganFhirPreview = async (id) => {
     }
   }
 
+<<<<<<< Updated upstream
   // 5. Procedure Resource (Tindakan ICD-9-CM)
+=======
+  // 6. Procedure Resource (Tindakan ICD-9-CM)
+>>>>>>> Stashed changes
   if (tindakans && tindakans.length > 0) {
     for (const t of tindakans) {
       if (t.icd9) {
@@ -841,7 +923,11 @@ const getKunjunganFhirPreview = async (id) => {
     }
   }
 
+<<<<<<< Updated upstream
   // 6. MedicationRequest Resource (Resep Obat)
+=======
+  // 7. MedicationRequest Resource (Resep Obat KFA)
+>>>>>>> Stashed changes
   if (resep && resep.length > 0) {
     for (const r of resep) {
       if (r.details) {
@@ -890,10 +976,61 @@ const getKunjunganFhirPreview = async (id) => {
           }
         }
       }
+<<<<<<< Updated upstream
     }
   }
 
   // 7. CarePlan Resource (Plan & Rencana Terapi / Instruksi Medis Dokter)
+=======
+
+      // 8. QuestionnaireResponse Resource (Pengkajian Resep Apoteker Section 15p Kemenkes v6.2)
+      const questionnaireResponseResource = {
+        resourceType: "QuestionnaireResponse",
+        id: `qr-resep-${r.id}`,
+        status: "completed",
+        questionnaire: "https://fhir.kemkes.go.id/Questionnaire/Q0001",
+        subject: {
+          reference: `Patient/${pasien.noIHS || pasien.id}`,
+          display: pasien.namaLengkap
+        },
+        encounter: {
+          reference: `Encounter/${kunjungan.satusehatId || kunjungan.id}`
+        },
+        authored: new Date(r.tanggalResep).toISOString(),
+        item: [
+          {
+            linkId: "1",
+            text: "Persyaratan Administrasi",
+            item: [
+              { linkId: "1.1", text: "Nama, umur, jenis kelamin, BB/TB Pasien", answer: [{ valueBoolean: true }] },
+              { linkId: "1.2", text: "Nama, SIP, Alamat Dokter", answer: [{ valueBoolean: true }] }
+            ]
+          },
+          {
+            linkId: "2",
+            text: "Persyaratan Farmasetik",
+            item: [
+              { linkId: "2.1", text: "Nama obat, bentuk dan kekuatan sediaan", answer: [{ valueBoolean: true }] },
+              { linkId: "2.2", text: "Aturan dan cara penggunaan", answer: [{ valueBoolean: true }] }
+            ]
+          },
+          {
+            linkId: "3",
+            text: "Persyaratan Klinis",
+            item: [
+              { linkId: "3.1", text: "Ketepatan indikasi, dosis, dan waktu penggunaan", answer: [{ valueBoolean: true }] },
+              { linkId: "3.2", text: "Duplikasi pengobatan", answer: [{ valueBoolean: false }] },
+              { linkId: "3.3", text: "Alergi dan ROTD", answer: [{ valueBoolean: false }] }
+            ]
+          }
+        ]
+      };
+      bundle.entry.push({ resource: questionnaireResponseResource });
+    }
+  }
+
+  // 9. CarePlan Resource (Plan Rencana Terapi Dokter)
+>>>>>>> Stashed changes
   if (rekamMedis && (rekamMedis.rencanaTerapi || rekamMedis.instruksiMedis)) {
     const carePlanResource = {
       resourceType: "CarePlan",
@@ -923,7 +1060,11 @@ const getKunjunganFhirPreview = async (id) => {
     bundle.entry.push({ resource: carePlanResource });
   }
 
+<<<<<<< Updated upstream
   // 8. ServiceRequest Resource (Rujukan Keluar RS)
+=======
+  // 10. ServiceRequest Resource (Rujukan Keluar RS)
+>>>>>>> Stashed changes
   if (rujukanKeluar) {
     const serviceRequestResource = {
       resourceType: "ServiceRequest",
@@ -963,7 +1104,11 @@ const getKunjunganFhirPreview = async (id) => {
     bundle.entry.push({ resource: serviceRequestResource });
   }
 
+<<<<<<< Updated upstream
   // 9. DiagnosticReport & Observation Resource (Hasil Laboratorium)
+=======
+  // 11. DiagnosticReport & Observation Resource (Hasil Laboratorium)
+>>>>>>> Stashed changes
   if (orderLab && orderLab.details && orderLab.details.length > 0) {
     const labObsResult = [];
     for (const d of orderLab.details) {

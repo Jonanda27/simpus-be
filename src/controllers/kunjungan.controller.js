@@ -105,12 +105,23 @@ const getDokterDashboardStats = async (req, res, next) => {
   }
 };
 
+const getKunjunganFhirPreview = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const data = await kunjunganService.getKunjunganFhirPreview(id);
+    res.status(200).json(data);
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getKunjunganScreening,
   panggilKunjungan,
   getKunjunganById,
-  updateStatusKunjungan, // Wajib diexport
+  updateStatusKunjungan,
   getDashboardStats,
   getPerawatDashboardStats,
   getDokterDashboardStats,
+  getKunjunganFhirPreview,
 };
