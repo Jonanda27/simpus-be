@@ -1,6 +1,8 @@
 const prisma = require('../config/prisma');
 const cloudinary = require('cloudinary').v2;
 const satusehatService = require('./satusehat.service');
+const PCareService = require('./bpjs/pcare.service');
+const bpjsConfig = require('../config/bpjs');
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -38,6 +40,34 @@ const createPasien = async (data) => {
     }
   }
 
+  let newIhs = data.noIHS;
+  if (!newIhs && data.nik) {
+    try {
+      if (data.isBayi) {
+        // Bayi belum punya NIK, jadi kita lewati tahap GET Patient By NIK
+        // Langsung POST pendaftaran karena kita menggunakan NIK Ibunya
+        const postRes = await satusehatService.createPatient(data);
+        if (postRes.success && postRes.ihsNumber) {
+          newIhs = postRes.ihsNumber;
+        }
+      } else {
+        // Cek apakah NIK sudah ada di SATUSEHAT
+        const checkRes = await satusehatService.getPatientByNIK(data.nik);
+        if (checkRes.success && checkRes.ihsNumber) {
+          newIhs = checkRes.ihsNumber;
+        } else {
+          // Jika tidak ada, daftarkan pasien baru ke SATUSEHAT
+          const postRes = await satusehatService.createPatient(data);
+          if (postRes.success && postRes.ihsNumber) {
+            newIhs = postRes.ihsNumber;
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Gagal sinkronisasi pendaftaran ke SATUSEHAT:", e.message);
+    }
+  }
+
   // Gunakan transaksi untuk memastikan semua data tersimpan atau tidak sama sekali (atomic)
   const newPasien = await prisma.$transaction(async (tx) => {
     
@@ -50,7 +80,7 @@ const createPasien = async (data) => {
       pasien = await tx.pasien.create({
         data: {
           noRM: data.noRekamMedis,
-          noIHS: data.noIHS,
+          noIHS: newIhs || null,
           nik: data.nik,
           noKk: data.noKk,
           namaLengkap: data.namaLengkap,
@@ -125,11 +155,13 @@ const createPasien = async (data) => {
       });
     }
 
-    // 0. Generate Nomor Antrean
-    const poliklinik = await tx.poliklinik.findUnique({
-      where: { id: data.poliTujuan }
-    });
-    const prefix = poliklinik ? poliklinik.kodePoli.charAt(0).toUpperCase() : 'U';
+    // 0. Generate Nomor Antrean (Opsional jika poliTujuan ada)
+    let kunjungan = null;
+    if (data.poliTujuan) {
+      const poliklinik = await tx.poliklinik.findUnique({
+        where: { id: data.poliTujuan }
+      });
+      const prefix = poliklinik ? poliklinik.kodePoli.charAt(0).toUpperCase() : 'U';
     
     const regDate = new Date(data.tanggalRegistrasi);
     const startOfDay = new Date(regDate.setHours(0, 0, 0, 0));
@@ -240,6 +272,56 @@ const createPasien = async (data) => {
         console.error('Failed to create Encounter in SATUSEHAT:', error);
         // We don't throw here to ensure local registration still succeeds
       }
+    } // End if (data.poliTujuan)
+    }
+
+    // ================================================================
+    // [BPJS PCARE BRIDGING] Anti-Corruption Layer — Soft-fail Pattern
+    // Identik dengan pola SATUSEHAT di atas: pendaftaran lokal SELALU sukses.
+    // Jika BPJS down → statusKlaimBpjs = 'PENDING_SYNC' (bisa di-sync ulang nanti).
+    // ================================================================
+    const isBpjs = data.jenisPenjamin === 'BPJS' || data.jenisPenjamin === 'BPJS Kesehatan';
+    const hasBpjsCredentials = bpjsConfig.BPJS_CONS_ID && bpjsConfig.BPJS_SECRET_KEY;
+
+    if (isBpjs && data.noBpjs && hasBpjsCredentials) {
+      try {
+        // Format tanggal ke YYYY-MM-DD (requirement PCare)
+        const tglDaftar = new Date(data.tanggalRegistrasi).toISOString().split('T')[0];
+
+        const pcareResult = await PCareService.daftarkanKunjungan({
+          noBpjs: data.noBpjs,
+          tanggalRegistrasi: tglDaftar,
+          kdPoliTujuan: poliklinik?.kodePoli || data.poliTujuan,
+          noRM: pasien.noRM,
+        });
+
+        // Sukses → simpan nomor kunjungan PCare ke database
+        await tx.kunjungan.update({
+          where: { id: kunjungan.id },
+          data: {
+            noKunjunganPcare: pcareResult.noKunjungan,
+            noUrutPcare: pcareResult.noUrut?.toString(),
+            statusKlaimBpjs: 'TERKIRIM',
+          },
+        });
+
+        kunjungan.noKunjunganPcare = pcareResult.noKunjungan;
+        kunjungan.statusKlaimBpjs = 'TERKIRIM';
+
+        console.log(`[BPJS PCare] Kunjungan berhasil didaftarkan. NoKunjungan: ${pcareResult.noKunjungan}`);
+      } catch (bpjsError) {
+        // SOFT-FAIL: BPJS down/error → catat sebagai PENDING_SYNC
+        // Petugas bisa sync ulang nanti via tombol di frontend.
+        console.error('[BPJS PCare] Gagal mendaftarkan kunjungan (soft-fail):', bpjsError.message);
+
+        await tx.kunjungan.update({
+          where: { id: kunjungan.id },
+          data: { statusKlaimBpjs: 'PENDING_SYNC' },
+        });
+
+        kunjungan.statusKlaimBpjs = 'PENDING_SYNC';
+        // TIDAK throw error — pendaftaran lokal tetap sukses!
+      }
     }
 
     return { ...pasien, kunjungan };
@@ -255,6 +337,7 @@ const getAllPasien = async () => {
       kontak: true,
       sosial: true,
       penjamin: true,
+      dataBayi: true,
     },
     orderBy: {
       createdAt: 'desc'

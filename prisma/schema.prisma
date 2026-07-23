@@ -43,6 +43,12 @@ model User {
   imunisasiDilakukan  RiwayatImunisasi[] @relation("PetugasImunisasi")
   
   tenagaMedis      TenagaMedis?
+
+  // Relasi SATUSEHAT FHIR Baru
+  assessorImpressions   ClinicalImpression[] @relation("AssessorClinicalImpression")
+  petugasSampel         SampelLaboratorium[] @relation("PetugasPengambilSampel")
+  laporanDiagnostik     LaporanDiagnostik[]  @relation("DokterLaporanDiagnostik")
+  authorResumeMedis     ResumeMedis[]        @relation("DokterResumeMedis")
 }
 
 // 1. Data Induk Pasien
@@ -50,8 +56,13 @@ model Pasien {
   id              String      @id @default(cuid())
   noRM            String      @unique
   noIHS           String?     @unique
+  satusehat_ihs   String?
   nik             String      @unique
   noKk            String?
+  noPaspor        String?
+  noKitas         String?
+  namaIbuKandung    String?
+  bahasa          String?     @default("id")
   
   namaLengkap     String
   tempatLahir     String
@@ -88,6 +99,12 @@ model Pasien {
   riwayatImunisasi  RiwayatImunisasi[]
   registerUkm     RegisterUKM[]
   alergis         AlergiPasien[]
+
+  // Relasi SATUSEHAT FHIR Baru
+  clinicalImpressions   ClinicalImpression[]
+  sampelLabs            SampelLaboratorium[]
+  laporanDiagnostik     LaporanDiagnostik[]
+  resumeMedis           ResumeMedis[]
 
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
@@ -147,6 +164,8 @@ model DataBayi {
   panjangLahir    String?
   jamLahir        String?
   jenisPersalinan String?
+  isKelahiranGanda Boolean    @default(false)
+  urutanKelahiran  Int?       @default(1)
 }
 
 // 6. Data Penjamin / Asuransi
@@ -197,11 +216,29 @@ model Kunjungan {
   noSep             String?
   encounterId       String?     // ID Encounter dari SATUSEHAT
   satusehatSync     Json?       // Tracking sinkronisasi SATUSEHAT
+  satusehat_encounter_id String?
+  satusehat_sync_status  String   @default("PENDING")
+  satusehat_last_error    String?  @db.Text
+
+  // ==========================================
+  // KOLOM BRIDGING BPJS PCARE (Anti-Corruption Layer)
+  // ==========================================
+  noKunjunganPcare  String?     // Nomor Kunjungan dari API PCare BPJS (setara SEP di RS)
+  noUrutPcare       String?     // Nomor urut antrian di PCare
+  statusKlaimBpjs   String?     // PENDING_SYNC | TERKIRIM | GAGAL | TIDAK_BERLAKU
   
   statusKunjungan   String      @default("MENUNGGU") // MENUNGGU, DIPERIKSA, SELESAI, BATAL dll
+<<<<<<< HEAD
   statusPulang      String?     // PULANG_SEMBUH, DIRUJUK_RS, RAWAT_INAP, KONTROL_ULANG (FHIR Discharge Disposition)
   waktuPemeriksaanMulai DateTime?
   waktuPemeriksaanSelesai DateTime?
+=======
+
+  waktuDischarge    DateTime?
+  caraKeluar        String?     // "PERSATUAN_DOKTER", "RUJUK", "PULANG_PAKSA", "MENINGGAL"
+  kondisiDischarge   String?     // "SEMBUH", "MEMBAIK", "BELUM_SEMBUH", "MENINGGAL"
+
+>>>>>>> 1f3cd31ad4b22d640644e62b13afc863e70fd8fc
   
   // Relasi Ke Petugas (User)
   userPendaftarId   String?
@@ -226,6 +263,12 @@ model Kunjungan {
   pemeriksaanRadiologi PemeriksaanRadiologi[] // Relasi langsung untuk mempermudah query ImagingStudy
   tagihan           Tagihan?
   riwayatImunisasi  RiwayatImunisasi[] // 1 Kunjungan bisa banyak suntikan vaksin
+
+  // Relasi SATUSEHAT FHIR Baru
+  clinicalImpressions   ClinicalImpression[]
+  sampelLabs            SampelLaboratorium[]
+  laporanDiagnostik     LaporanDiagnostik[]
+  resumeMedis           ResumeMedis?
 
   createdAt         DateTime    @default(now())
   updatedAt         DateTime    @updatedAt
@@ -354,6 +397,9 @@ model RekamMedis {
   penginputId             String?   // ID Asisten/Perawat yang menginput data
   penginput               User?     @relation("PenginputRekamMedis", fields: [penginputId], references: [id])
 
+  // Relasi FHIR ClinicalImpression 1-to-1
+  clinicalImpression      ClinicalImpression?
+
   createdAt               DateTime  @default(now())
   updatedAt               DateTime  @updatedAt
 }
@@ -471,6 +517,9 @@ model MasterLaboratorium {
   parameter    String
   satuan       String?
   nilaiRujukan String?
+  kodePanelLab String?
+  hargaTarif   Float    @default(0)
+  statusAktif  Boolean  @default(true)
   
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
@@ -511,6 +560,8 @@ model Poliklinik {
   deskripsi       String?
   statusAktif     Boolean     @default(true)
   ihsLocationId   String?     @unique
+  kdPoliPcare     String?
+  noAntrianPrefix String?
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
 
@@ -541,12 +592,15 @@ model LayananKlinik {
 model MasterObat {
   id              String      @id @default(cuid())
   kodeObat        String      @unique
+  kfa_code        String?
   namaObat        String
   kategori        String      // Obat Bebas, Obat Keras, Narkotika, dll
   sediaan         String      // Tablet, Kapsul, Sirup, Injeksi, Salep
   harga           Float       @default(0)
   stok            Int         @default(0)
   gambarUrl       String?     // URL gambar (mockup)
+  noBatch         String?
+  tanggalExpired  DateTime?
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
 
@@ -584,6 +638,10 @@ model ResepDetail {
   jumlah          Int
   aturanPakai     String      // Contoh: 3 x 1 Tablet sesudah makan
   catatan         String?
+  dosisAngka      Float?      // Misal: 500
+  dosisSatuan     String?     // Misal: "mg"
+  rutePemberian   String?     @default("O") // Code WHO ATC / SNOMED CT (O = Oral)
+  frekuensi       Int?        @default(3)   // 3 kali sehari
 }
 
 model RujukanKeluar {
@@ -609,6 +667,14 @@ model RujukanKeluar {
 
 model OrderLaboratorium {
   id              String      @id @default(cuid())
+  
+  // Pondasi SATUSEHAT FHIR (ServiceRequest)
+  satusehatId     String?     @unique // ID ServiceRequest di SATUSEHAT
+  intent          String      @default("original-order") // proposal | plan | directive | order | original-order
+  priority        String      @default("routine")        // routine | urgent | asap | stat
+  categoryCode    String?     @default("108252007")      // Kode SNOMED CT (108252007 = Laboratory procedure)
+  requestCode     String?                                 // Kode LOINC / KFA untuk pemeriksaan lab
+
   kunjunganId     String      @unique
   kunjungan       Kunjungan   @relation(fields: [kunjunganId], references: [id], onDelete: Cascade)
   
@@ -622,7 +688,11 @@ model OrderLaboratorium {
   catatanKlinis   String?     @db.Text
   tanggalOrder    DateTime    @default(now())
   
+  satusehatSync   Json?
+
   details         OrderLaboratoriumDetail[]
+  sampelLabs      SampelLaboratorium[]
+  laporanDiagnostik LaporanDiagnostik?
 }
 
 model OrderLaboratoriumDetail {
@@ -653,10 +723,17 @@ model MasterModality {
   pemeriksaan     PemeriksaanRadiologi[]
 }
 
-// Wadah untuk Order/Permintaan dari Dokter (Induk dari pemeriksaan)
+// Wadah untuk Order/Permintaan dari Dokter (Induk dari pemeriksaan - FHIR ServiceRequest)
 model OrderRadiologi {
   id              String      @id @default(cuid())
   
+  // Pondasi SATUSEHAT FHIR (ServiceRequest)
+  satusehatId     String?     @unique // ID ServiceRequest di SATUSEHAT
+  intent          String      @default("original-order")
+  priority        String      @default("routine")
+  categoryCode    String?     @default("363679005")      // Kode SNOMED CT (363679005 = Imaging)
+  requestCode     String?                                 // Kode DICOM / SNOMED
+
   kunjunganId     String      @unique
   kunjungan       Kunjungan   @relation(fields: [kunjunganId], references: [id], onDelete: Cascade)
   
@@ -670,7 +747,10 @@ model OrderRadiologi {
   catatanKlinis   String?     @db.Text
   tanggalOrder    DateTime    @default(now())
   
+  satusehatSync   Json?
+
   pemeriksaan     PemeriksaanRadiologi[]
+  laporanDiagnostik LaporanDiagnostik?
 }
 
 // Wadah Utama ImagingStudy (One-to-Many terhadap Order & Kunjungan)
@@ -942,4 +1022,240 @@ model AlergiPasien {
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
 }
+
+// ==========================================
+// REFERENSI ENUM (DYNAMIC DROPDOWNS FOR FE)
+// ==========================================
+
+model RefJenisPenjamin {
+  id          String   @id @default(cuid())
+  kode        String   @unique // "UMUM", "BPJS", "ASURANSI", "PERUSAHAAN"
+  label       String           // "Umum / Mandiri", "BPJS Kesehatan"
+  deskripsi   String?
+  isBpjs      Boolean  @default(false)
+  statusAktif Boolean  @default(true)
+  urutan      Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model RefJenisPelayanan {
+  id          String   @id @default(cuid())
+  kode        String   @unique // "RAWAT_JALAN", "RAWAT_INAP", "IGD", "UKM"
+  label       String           // "Rawat Jalan"
+  statusAktif Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model RefCaraDatang {
+  id               String   @id @default(cuid())
+  kode             String   @unique // "MANDIRI", "AMBULANS", "RUJUKAN"
+  label            String           // "Datang Sendiri"
+  butuhDataRujukan Boolean  @default(false)
+  statusAktif      Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+model RefPrioritas {
+  id          String   @id @default(cuid())
+  kode        String   @unique // "UMUM", "LANSIA", "DISABILITAS", "HAMIL", "ANAK"
+  label       String           // "Lansia (>60 Tahun)"
+  warnaBadge  String?          // "yellow", "red"
+  urutan      Int      @default(0)
+  statusAktif Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model RefKategoriTriage {
+  id          String   @id @default(cuid())
+  kode        String   @unique // "MERAH", "KUNING", "HIJAU", "HITAM"
+  label       String           // "Resusitasi / Merah"
+  warna       String           // "#EF4444"
+  deskripsi   String?
+  urutan      Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model RefMetodePembayaran {
+  id          String   @id @default(cuid())
+  kode        String   @unique // "TUNAI", "TRANSFER", "QRIS", "BPJS"
+  label       String
+  isBpjs      Boolean  @default(false)
+  statusAktif Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model RefSediaanObat {
+  id          String   @id @default(cuid())
+  kode        String   @unique // "TABLET", "KAPSUL", "SIRUP", "INJEKSI", "SALEP"
+  label       String
+  statusAktif Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model RefKategoriObat {
+  id          String   @id @default(cuid())
+  kode        String   @unique // "OBAT_BEBAS", "OBAT_KERAS", "NARKOTIKA", "PSIOTROPIKA"
+  label       String
+  warnaBadge  String?
+  statusAktif Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// ==========================================
+// PONDASI SATUSEHAT FHIR R4 RESOURCE MODELS
+// ==========================================
+
+// 1. FHIR ClinicalImpression (Evaluasi Klinis SOAP & Prognosis)
+model ClinicalImpression {
+  id                    String      @id @default(cuid())
+  satusehatId           String?     @unique // ID ClinicalImpression dari SATUSEHAT
+
+  rekamMedisId          String?     @unique
+  rekamMedis            RekamMedis? @relation(fields: [rekamMedisId], references: [id], onDelete: Cascade)
+
+  pasienId              String
+  pasien                Pasien      @relation(fields: [pasienId], references: [id], onDelete: Cascade)
+
+  kunjunganId           String
+  kunjungan             Kunjungan   @relation(fields: [kunjunganId], references: [id], onDelete: Cascade)
+
+  dokterId              String?
+  dokter                User?       @relation("AssessorClinicalImpression", fields: [dokterId], references: [id])
+
+  status                String      @default("completed") // in-progress | completed | entered-in-error
+  statusReason          String?     // Alasan status / ICD-10 code
+  summary               String?     @db.Text // Teks ringkasan investigasi & kesan
+  description           String?     @db.Text // Konteks & penyebab asesmen
+
+  prognosisKode         String?     // Kode terminologi (cth: PR000001)
+  prognosisDisplay      String?     // Free text / display (cth: "Prognosis Baik")
+
+  investigationJson     Json?       // UUID Observation, Condition, DiagnosticReport terkait
+  satusehatSync         Json?       // Tracking sinkronisasi SATUSEHAT
+
+  createdAt             DateTime    @default(now())
+  updatedAt             DateTime    @updatedAt
+}
+
+// 2. FHIR Specimen (Sampel Laboratorium)
+model SampelLaboratorium {
+  id                    String            @id @default(cuid())
+  satusehatId           String?           @unique // ID Specimen dari SATUSEHAT
+
+  orderLabId            String
+  orderLab              OrderLaboratorium @relation(fields: [orderLabId], references: [id], onDelete: Cascade)
+
+  pasienId              String
+  pasien                Pasien            @relation(fields: [pasienId], references: [id], onDelete: Cascade)
+
+  kunjunganId           String
+  kunjungan             Kunjungan         @relation(fields: [kunjunganId], references: [id], onDelete: Cascade)
+
+  collectorId           String?
+  collector             User?             @relation("PetugasPengambilSampel", fields: [collectorId], references: [id])
+
+  jenisSpesimenKode     String            // Kode SNOMED CT (cth: 119294007 = Blood, 122575003 = Urine)
+  jenisSpesimenNama     String            // Display (cth: "Darah Vena", "Dahak/Sputum")
+
+  waktuPengambilan      DateTime          @default(now())
+  waktuDiterima         DateTime?
+
+  volume                Float?
+  satuanVolume          String?           // mL, drop, vial
+  kondisiSpesimen       String?           // available | unavailable | autolyzed
+  metodePengambilan     String?           // Kode SNOMED CT metode
+  catatan               String?           @db.Text
+
+  statusPuasa           Boolean           @default(false)
+  petugasPengantar      String?
+  petugasPenerima       String?
+  petugasPenganalisis   String?
+  prosedurFiksasi       String?
+  waktuFiksasi          DateTime?
+  cairanFiksasi         String?
+  volumeCairanFiksasi   Float?
+
+  satusehatSync         Json?
+
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+}
+
+// 3. FHIR DiagnosticReport (Laporan Diagnostik Lab & Radiologi)
+model LaporanDiagnostik {
+  id                    String            @id @default(cuid())
+  satusehatId           String?           @unique // ID DiagnosticReport dari SATUSEHAT
+
+  kunjunganId           String
+  kunjungan             Kunjungan         @relation(fields: [kunjunganId], references: [id], onDelete: Cascade)
+
+  pasienId              String
+  pasien                Pasien            @relation(fields: [pasienId], references: [id], onDelete: Cascade)
+
+  dokterId              String?
+  dokter                User?             @relation("DokterLaporanDiagnostik", fields: [dokterId], references: [id])
+
+  kategori              String            // "LABORATORIUM" | "RADIOLOGI"
+  kodePemeriksaan       String            // Kode LOINC / DICOM / KFA
+  namaPemeriksaan       String
+  status                String            @default("final") // registered | partial | final | amended
+
+  kesimpulan            String?           @db.Text // DiagnosticReport.conclusion
+  waktuLaporan          DateTime          @default(now())
+
+  orderLabId            String?           @unique
+  orderLab              OrderLaboratorium? @relation(fields: [orderLabId], references: [id], onDelete: SetNull)
+
+  orderRadiologiId      String?           @unique
+  orderRadiologi        OrderRadiologi?   @relation(fields: [orderRadiologiId], references: [id], onDelete: SetNull)
+
+  observationIds        Json?             // Array UUID Result Observation
+  satusehatSync         Json?
+
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+}
+
+// 4. FHIR Composition (Resume Medis Pasien)
+model ResumeMedis {
+  id                    String            @id @default(cuid())
+  satusehatId           String?           @unique // ID Composition dari SATUSEHAT
+
+  kunjunganId           String            @unique
+  kunjungan             Kunjungan         @relation(fields: [kunjunganId], references: [id], onDelete: Cascade)
+
+  pasienId              String
+  pasien                Pasien            @relation(fields: [pasienId], references: [id], onDelete: Cascade)
+
+  dokterId              String
+  dokter                User              @relation("DokterResumeMedis", fields: [dokterId], references: [id])
+
+  typeCode              String            @default("11488-4") // LOINC 11488-4 (Consultation note / Discharge summary)
+  status                String            @default("final")   // preliminary | final | amended
+  title                 String            @default("Resume Medis Pasien")
+
+  ringkasanKlinis       String?           @db.Text
+  instruksiTindakLanjut String?           @db.Text
+
+  // Agregasi UUID Resource FHIR selama kunjungan
+  conditionIds          Json?             // Array of SATUSEHAT Condition UUIDs
+  observationIds        Json?             // Array of SATUSEHAT Observation UUIDs
+  procedureIds          Json?             // Array of SATUSEHAT Procedure UUIDs
+  medicationRequestIds  Json?             // Array of SATUSEHAT MedicationRequest UUIDs
+
+  satusehatSync         Json?
+
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+}
+
+
 

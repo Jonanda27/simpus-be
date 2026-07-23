@@ -60,7 +60,29 @@ const createFhirClient = async () => {
   });
 };
 
+/**
+ * Send FHIR Transaction Bundle to SATUSEHAT (POST /fhir-r4/v1/)
+ * @param {Object} payload - FHIR Bundle payload (type: transaction)
+ * @returns {Promise<Object>} Response from SATUSEHAT
+ */
+const sendBundleTransaction = async (payload) => {
+  try {
+    const fhirClient = await createFhirClient();
+    const response = await fhirClient.post('', payload);
+    return response.data;
+  } catch (error) {
+    console.error('[SATUSEHAT Client] Error sending transaction bundle:', error.response?.data || error.message);
+    const issue = error.response?.data?.issue?.[0];
+    const errorMsg = issue?.diagnostics || issue?.details?.text || error.response?.data?.message || error.message;
+    const err = new Error(`Gagal mengirim Transaction Bundle ke SATUSEHAT: ${errorMsg}`);
+    err.statusCode = error.response?.status || 500;
+    err.details = error.response?.data;
+    throw err;
+  }
+};
+
 module.exports = {
   generateAccessToken,
-  createFhirClient
+  createFhirClient,
+  sendBundleTransaction
 };

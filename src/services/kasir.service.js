@@ -1,5 +1,4 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const prisma = require('../config/prisma');
 
 const getAntrianKasir = async () => {
   return await prisma.kunjungan.findMany({
@@ -23,11 +22,19 @@ const getAntrianKasir = async () => {
   });
 };
 
+/**
+ * Generate Tagihan Kasir menggunakan Pricing Snapshot Pattern (Q3 Architecture)
+ * Harga diambil dinamis dari Master Data (LayananKlinik, MasterObat, MasterLaboratorium),
+ * lalu di-snapshot (copy fisik) ke DetailTagihan agar historis akuntansi tidak berubah jika tarif master naik.
+ */
 const generateTagihan = async (kunjunganId) => {
   const kunjungan = await prisma.kunjungan.findUnique({
     where: { id: kunjunganId },
     include: {
       pasien: true,
+      poliklinik: {
+        include: { layananKliniks: true }
+      },
       tindakans: {
         include: { icd9: true },
       },
@@ -45,7 +52,7 @@ const generateTagihan = async (kunjunganId) => {
     throw new Error('Kunjungan tidak ditemukan');
   }
 
-  // Jika tagihan sudah ada (tapi belum dibayar), kita hapus lalu generate ulang (untuk refresh)
+  // Jika tagihan sudah ada (tapi belum dibayar), kita hapus lalu generate ulang (refresh snapshot)
   if (kunjungan.tagihan && kunjungan.tagihan.statusTagihan !== 'LUNAS') {
     await prisma.tagihan.delete({
       where: { id: kunjungan.tagihan.id },
@@ -57,21 +64,39 @@ const generateTagihan = async (kunjunganId) => {
   const details = [];
   let totalBiaya = 0;
 
-  // 1. Karcis / Administrasi
-  const tarifKarcis = 15000;
+  // 1. Karcis / Layanan Registrasi Poliklinik (Dynamic Lookup dari LayananKlinik)
+  let tarifPoli = 15000; // Default fallback
+  if (kunjungan.poliklinik && kunjungan.poliklinik.layananKliniks.length > 0) {
+    const matchedLayanan = kunjungan.poliklinik.layananKliniks.find(
+      l => l.kodeLayanan === kunjungan.layananTujuan || l.namaLayanan.toLowerCase().includes('konsul')
+    ) || kunjungan.poliklinik.layananKliniks[0];
+    if (matchedLayanan) {
+      tarifPoli = matchedLayanan.tarifDasar;
+    }
+  }
+
   details.push({
-    namaItem: 'Karcis Pendaftaran & Konsultasi',
+    namaItem: `Karcis & Konsultasi (${kunjungan.poliklinik?.namaPoli || 'Umum'})`,
     kategori: 'Pendaftaran',
     jumlah: 1,
-    hargaSatuan: tarifKarcis,
-    subTotal: tarifKarcis,
+    hargaSatuan: tarifPoli,
+    subTotal: tarifPoli,
   });
-  totalBiaya += tarifKarcis;
+  totalBiaya += tarifPoli;
 
-  // 2. Tindakan (Dummy 50.000)
+  // 2. Tindakan Medis (Dinamis dari LayananKlinik jika ada, atau default 50.000)
   if (kunjungan.tindakans && kunjungan.tindakans.length > 0) {
     for (const t of kunjungan.tindakans) {
-      const tarifTindakan = 50000;
+      let tarifTindakan = 50000;
+      if (kunjungan.poliklinik && kunjungan.poliklinik.layananKliniks.length > 0) {
+        const foundLayanan = kunjungan.poliklinik.layananKliniks.find(
+          l => l.kodeLayanan === t.icd9?.kode_icd9
+        );
+        if (foundLayanan) {
+          tarifTindakan = foundLayanan.tarifDasar;
+        }
+      }
+
       details.push({
         namaItem: `Tindakan: ${t.icd9?.nama_prosedur || 'Prosedur Medis'}`,
         kategori: 'Tindakan',
@@ -83,13 +108,14 @@ const generateTagihan = async (kunjunganId) => {
     }
   }
 
-  // 3. Obat / Resep (Dummy 10.000 per obat)
+  // 3. Obat / Resep (Dinamis dari MasterObat.harga — Dynamic Snapshot)
   if (kunjungan.resep && kunjungan.resep.length > 0) {
     for (const r of kunjungan.resep) {
       if (r.details) {
         for (const detail of r.details) {
-          const tarifObat = 10000; // Harusnya diambil dari detail.obat.harga
-          const qty = detail.jumlah;
+          // Ambil harga asli dari MasterObat
+          const tarifObat = detail.obat?.harga !== undefined ? detail.obat.harga : 10000;
+          const qty = detail.jumlah || 1;
           const subTotalObat = tarifObat * qty;
           details.push({
             namaItem: `Obat: ${detail.obat?.namaObat || 'Obat Generik'}`,
@@ -104,10 +130,14 @@ const generateTagihan = async (kunjunganId) => {
     }
   }
 
-  // 4. Lab (Dummy 30.000 per parameter)
+  // 4. Laboratorium (Dinamis dari MasterLaboratorium.hargaTarif — Dynamic Snapshot)
   if (kunjungan.orderLab && kunjungan.orderLab.details) {
+    // Ambil master lab untuk lookup tarif
+    const masterLabs = await prisma.masterLaboratorium.findMany();
+    const labTarifMap = new Map(masterLabs.map(m => [m.parameter.toLowerCase(), m.hargaTarif]));
+
     for (const detail of kunjungan.orderLab.details) {
-      const tarifLab = 30000;
+      const tarifLab = labTarifMap.get(detail.parameter.toLowerCase()) || 30000;
       details.push({
         namaItem: `Lab: ${detail.parameter}`,
         kategori: 'Laboratorium',
@@ -119,7 +149,7 @@ const generateTagihan = async (kunjunganId) => {
     }
   }
 
-  // Buat Tagihan
+  // Buat Tagihan dengan Pricing Snapshot
   const tagihan = await prisma.tagihan.create({
     data: {
       kunjunganId: kunjungan.id,

@@ -90,11 +90,15 @@ const simpanTindakan = async (req, res, next) => {
 const selesaikanPemeriksaan = async (req, res, next) => {
   try {
     const { kunjunganId } = req.params;
-    const data = await rawatJalanService.selesaikanPemeriksaan(kunjunganId, req.user);
+    const result = await rawatJalanService.selesaikanPemeriksaan(kunjunganId, req.user);
     res.status(200).json({
       success: true,
       message: 'Pemeriksaan selesai',
-      data,
+      data: result.rekamMedis || result,
+      satusehat: {
+        syncStatus: result.satusehat_sync_status || 'PENDING',
+        lastError: result.satusehat_last_error || null
+      }
     });
   } catch (error) {
     next(error);

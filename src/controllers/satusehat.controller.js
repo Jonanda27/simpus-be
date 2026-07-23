@@ -56,7 +56,12 @@ const syncPatientIHS = async (req, res, next) => {
     // Kita update data pasien jika pasien dengan NIK tersebut ada di DB kita
     const updatedPasien = await prisma.pasien.update({
       where: { nik: nik },
-      data: { noIHS: ihsNumber }
+      data: { noIHS: ihsNumber },
+      include: {
+        alamat: true,
+        kontak: true,
+        penjamin: true
+      }
     }).catch(() => null); // Abaikan error jika pasien belum ada di DB kita
 
     return res.status(200).json({
@@ -68,6 +73,9 @@ const syncPatientIHS = async (req, res, next) => {
         pasienName: result.data.name?.[0]?.text || '',
         birthDate: result.data.birthDate || '',
         gender: result.data.gender || '',
+        address: result.data.address || [],
+        telecom: result.data.telecom || [],
+        localPasien: updatedPasien,
         updatedInDb: !!updatedPasien
       }
     });

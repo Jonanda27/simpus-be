@@ -156,50 +156,47 @@ const sendObservationToSatuSehat = async (screeningId) => {
       encounterId: kunjungan.encounterId,
     };
 
-    const observationIds = [];
+    const observationPayloads = [];
 
     // 1. Suhu
     if (screening.suhuTubuh) {
-      const res = await satusehatService.createObservation({
+      observationPayloads.push({
         ...basePayload,
         loincCode: "8310-5",
         loincDisplay: "Body temperature",
         value: screening.suhuTubuh,
         unit: "C",
         unitCode: "Cel"
-      }).catch(e => console.error("Error Suhu:", e.message));
-      if (res && res.success) observationIds.push({ type: 'Suhu', id: res.observationId });
+      });
     }
 
     // 2. Nadi
     if (screening.nadi) {
-      const res = await satusehatService.createObservation({
+      observationPayloads.push({
         ...basePayload,
         loincCode: "8867-4",
         loincDisplay: "Heart rate",
         value: screening.nadi,
         unit: "beats/minute",
         unitCode: "/min"
-      }).catch(e => console.error("Error Nadi:", e.message));
-      if (res && res.success) observationIds.push({ type: 'Nadi', id: res.observationId });
+      });
     }
 
     // 3. SpO2
     if (screening.saturasiOksigen) {
-      const res = await satusehatService.createObservation({
+      observationPayloads.push({
         ...basePayload,
         loincCode: "2708-6",
         loincDisplay: "Oxygen saturation in Arterial blood",
         value: screening.saturasiOksigen,
         unit: "%",
         unitCode: "%"
-      }).catch(e => console.error("Error SpO2:", e.message));
-      if (res && res.success) observationIds.push({ type: 'SpO2', id: res.observationId });
+      });
     }
 
     // 4. Tekanan Darah (Sistolik / Diastolik)
     if (screening.tekananDarahSistolik && screening.tekananDarahDiastolik) {
-      const res = await satusehatService.createObservation({
+      observationPayloads.push({
         ...basePayload,
         loincCode: "85354-9",
         loincDisplay: "Blood pressure panel with all children optional",
@@ -217,60 +214,72 @@ const sendObservationToSatuSehat = async (screeningId) => {
             valueQuantity: { value: screening.tekananDarahDiastolik, unit: "mm[Hg]", system: "http://unitsofmeasure.org", code: "mm[Hg]" }
           }
         ]
-      }).catch(e => console.error("Error Tensi:", e.message));
-      if (res && res.success) observationIds.push({ type: 'Tekanan Darah', id: res.observationId });
+      });
     }
 
     // 5. Frekuensi Napas (Respiratory Rate)
     if (screening.frekuensiNapas) {
-      const res = await satusehatService.createObservation({
+      observationPayloads.push({
         ...basePayload,
         loincCode: "9279-1",
         loincDisplay: "Respiratory rate",
         value: screening.frekuensiNapas,
         unit: "breaths/minute",
         unitCode: "/min"
-      }).catch(e => console.error("Error Napas:", e.message));
-      if (res && res.success) observationIds.push({ type: 'Napas', id: res.observationId });
+      });
     }
 
     // 6. Tinggi Badan
     if (screening.tinggiBadan) {
-      const res = await satusehatService.createObservation({
+      observationPayloads.push({
         ...basePayload,
         loincCode: "8302-2",
         loincDisplay: "Body height",
         value: screening.tinggiBadan,
         unit: "cm",
         unitCode: "cm"
-      }).catch(e => console.error("Error Tinggi:", e.message));
-      if (res && res.success) observationIds.push({ type: 'Tinggi Badan', id: res.observationId });
+      });
     }
 
     // 7. Berat Badan
     if (screening.beratBadan) {
-      const res = await satusehatService.createObservation({
+      observationPayloads.push({
         ...basePayload,
         loincCode: "29463-7",
         loincDisplay: "Body weight",
         value: screening.beratBadan,
         unit: "kg",
         unitCode: "kg"
-      }).catch(e => console.error("Error Berat:", e.message));
-      if (res && res.success) observationIds.push({ type: 'Berat Badan', id: res.observationId });
+      });
     }
 
     // 8. Lingkar Perut
     if (screening.lingkarPerut) {
-      const res = await satusehatService.createObservation({
+      observationPayloads.push({
         ...basePayload,
         loincCode: "8280-0",
         loincDisplay: "Waist Circumference at umbilicus by Tape measure",
         value: screening.lingkarPerut,
         unit: "cm",
         unitCode: "cm"
-      }).catch(e => console.error("Error Lingkar Perut:", e.message));
-      if (res && res.success) observationIds.push({ type: 'Lingkar Perut', id: res.observationId });
+      });
+    }
+
+    // Send all observations in 1 Bundle Transaction
+    let observationIds = [];
+    if (observationPayloads.length > 0) {
+      try {
+        const resBundle = await satusehatService.createObservationBundle(observationPayloads);
+        if (resBundle && resBundle.success) {
+          // Map array of strings to objects for saving to DB
+          observationIds = resBundle.observationIds.map((id, index) => ({
+            type: `Observation_${index + 1}`, // Simplified naming
+            id: id
+          }));
+        }
+      } catch (e) {
+        console.error("Error creating Observation Bundle:", e.message);
+      }
     }
 
     // Update DB with observation Ids
