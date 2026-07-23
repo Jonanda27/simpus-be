@@ -171,12 +171,12 @@ const getDashboardStats = async () => {
     'Perusahaan': 0,
     'KIS': 0
   };
-  
+
   allKunjunganToday.forEach(k => {
     let jp = k.pasien?.penjamin?.jenisPenjamin || 'Umum / Mandiri';
     if (jp === 'Umum') jp = 'Umum / Mandiri';
     else if (jp.toLowerCase() === 'bpjs') jp = 'BPJS Kesehatan';
-    
+
     if (pembayaranMap[jp] === undefined) pembayaranMap[jp] = 0;
     pembayaranMap[jp]++;
   });
@@ -240,12 +240,12 @@ const getDashboardStats = async () => {
 
   const grafik = [];
   const days = ['Ming', 'Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab'];
-  
+
   for (let i = 0; i < 7; i++) {
     const d = new Date(sevenDaysAgo);
     d.setDate(d.getDate() + i);
     const dayStr = days[d.getDay()];
-    
+
     // Check if this date is today
     const isToday = d.getDate() === today.getDate() && d.getMonth() === today.getMonth();
     const label = isToday ? 'Ini' : dayStr;
@@ -310,15 +310,15 @@ const getPerawatDashboardStats = async (user) => {
   });
 
   const totalAntrean = allKunjunganPoli.length;
-  
+
   const antreanAktif = allKunjunganPoli.filter(k => k.statusKunjungan === 'MENUNGGU' || k.statusKunjungan === 'DIPROSES_SCREENING');
-  
+
   const belumSkrining = allKunjunganPoli.filter(k => k.statusKunjungan === 'MENUNGGU').length;
-  const sudahSkrining = allKunjunganPoli.filter(k => 
-    k.statusKunjungan === 'DIPERIKSA' || 
-    k.statusKunjungan === 'SELESAI' || 
-    k.statusKunjungan === 'MENUNGGU_KASIR' || 
-    k.statusKunjungan === 'MENUNGGU_FARMASI' || 
+  const sudahSkrining = allKunjunganPoli.filter(k =>
+    k.statusKunjungan === 'DIPERIKSA' ||
+    k.statusKunjungan === 'SELESAI' ||
+    k.statusKunjungan === 'MENUNGGU_KASIR' ||
+    k.statusKunjungan === 'MENUNGGU_FARMASI' ||
     k.statusKunjungan === 'PULANG'
   ).length;
 
@@ -377,13 +377,13 @@ const getDokterDashboardStats = async (user) => {
   });
 
   const totalHariIni = allKunjunganPoliHariIni.length;
-  
+
   const menunggu = allKunjunganPoliHariIni.filter(k => k.statusKunjungan === 'MENUNGGU_DOKTER').length;
   const sedangDilayani = allKunjunganPoliHariIni.filter(k => k.statusKunjungan === 'DIPERIKSA' || k.statusKunjungan === 'MENUNGGU_LAB').length;
-  const selesai = allKunjunganPoliHariIni.filter(k => 
-    k.statusKunjungan === 'SELESAI' || 
-    k.statusKunjungan === 'MENUNGGU_KASIR' || 
-    k.statusKunjungan === 'MENUNGGU_FARMASI' || 
+  const selesai = allKunjunganPoliHariIni.filter(k =>
+    k.statusKunjungan === 'SELESAI' ||
+    k.statusKunjungan === 'MENUNGGU_KASIR' ||
+    k.statusKunjungan === 'MENUNGGU_FARMASI' ||
     k.statusKunjungan === 'PULANG'
   ).length;
 
@@ -445,12 +445,8 @@ const getKunjunganFhirPreview = async (id) => {
   }
 
   const { pasien, screening, rekamMedis, rujukanKeluar, orderLab, diagnosis, tindakans, resep, poliklinik, dokterTujuan } = kunjungan;
-  
-<<<<<<< Updated upstream
-  // Construct FHIR Bundle
-=======
+
   // Construct FHIR Bundle Collection
->>>>>>> Stashed changes
   const bundle = {
     resourceType: "Bundle",
     type: "collection",
@@ -478,8 +474,6 @@ const getKunjunganFhirPreview = async (id) => {
     gender: pasien.jenisKelamin === 'Laki-laki' ? 'male' : 'female',
     birthDate: pasien.tanggalLahir ? new Date(pasien.tanggalLahir).toISOString().split('T')[0] : null
   };
-<<<<<<< Updated upstream
-=======
 
   if (pasien.alamat) {
     patientResource.address = [
@@ -494,7 +488,6 @@ const getKunjunganFhirPreview = async (id) => {
       }
     ];
   }
->>>>>>> Stashed changes
   bundle.entry.push({ resource: patientResource });
 
   // 2. Encounter Resource
@@ -503,23 +496,17 @@ const getKunjunganFhirPreview = async (id) => {
   else if (['SELESAI', 'MENUNGGU_KASIR', 'MENUNGGU_FARMASI', 'PULANG'].includes(kunjungan.statusKunjungan)) encounterStatus = "finished";
   else if (kunjungan.statusKunjungan === 'BATAL') encounterStatus = "cancelled";
 
-  const periodStart = kunjungan.waktuPemeriksaanMulai 
-    ? new Date(kunjungan.waktuPemeriksaanMulai).toISOString() 
+  const periodStart = kunjungan.waktuPemeriksaanMulai
+    ? new Date(kunjungan.waktuPemeriksaanMulai).toISOString()
     : new Date(kunjungan.tanggalRegistrasi).toISOString();
-    
-  const periodEnd = kunjungan.waktuPemeriksaanSelesai 
-    ? new Date(kunjungan.waktuPemeriksaanSelesai).toISOString() 
+
+  const periodEnd = kunjungan.waktuPemeriksaanSelesai
+    ? new Date(kunjungan.waktuPemeriksaanSelesai).toISOString()
     : new Date(kunjungan.updatedAt).toISOString();
 
-<<<<<<< Updated upstream
-  // Map discharge disposition if available
-  let dischargeDisp = undefined;
-  if (kunjungan.statusPulang === 'DIRUJUK_RS') {
-=======
   const statusPulang = kunjungan.statusPulang || kunjungan.caraKeluar;
   let dischargeDisp = undefined;
   if (statusPulang === 'DIRUJUK_RS') {
->>>>>>> Stashed changes
     dischargeDisp = {
       coding: [
         {
@@ -530,11 +517,7 @@ const getKunjunganFhirPreview = async (id) => {
       ],
       text: "Dirujuk ke Rumah Sakit"
     };
-<<<<<<< Updated upstream
-  } else if (kunjungan.statusPulang === 'RAWAT_INAP') {
-=======
   } else if (statusPulang === 'RAWAT_INAP') {
->>>>>>> Stashed changes
     dischargeDisp = {
       coding: [
         {
@@ -545,11 +528,7 @@ const getKunjunganFhirPreview = async (id) => {
       ],
       text: "Rawat Inap"
     };
-<<<<<<< Updated upstream
-  } else if (kunjungan.statusPulang === 'KONTROL_ULANG') {
-=======
   } else if (statusPulang === 'KONTROL_ULANG') {
->>>>>>> Stashed changes
     dischargeDisp = {
       coding: [
         {
@@ -650,7 +629,7 @@ const getKunjunganFhirPreview = async (id) => {
   // 3. Observation Resource (Vital Signs dari Screening)
   if (screening) {
     const observationComponents = [];
-    
+
     if (screening.tekananDarahSistolik !== null && screening.tekananDarahDiastolik !== null) {
       observationComponents.push(
         {
@@ -789,9 +768,6 @@ const getKunjunganFhirPreview = async (id) => {
     }
   }
 
-<<<<<<< Updated upstream
-  // 4. Condition Resource (Diagnosa ICD-10)
-=======
   // 4. Observation Resource (Exam Physical Head to Toe dari RekamMedis)
   if (rekamMedis && rekamMedis.pemeriksaanFisik) {
     const examObservationResource = {
@@ -832,7 +808,6 @@ const getKunjunganFhirPreview = async (id) => {
   }
 
   // 5. Condition Resource (Diagnosa ICD-10)
->>>>>>> Stashed changes
   if (diagnosis && diagnosis.length > 0) {
     for (const d of diagnosis) {
       if (d.icd10) {
@@ -888,11 +863,7 @@ const getKunjunganFhirPreview = async (id) => {
     }
   }
 
-<<<<<<< Updated upstream
-  // 5. Procedure Resource (Tindakan ICD-9-CM)
-=======
   // 6. Procedure Resource (Tindakan ICD-9-CM)
->>>>>>> Stashed changes
   if (tindakans && tindakans.length > 0) {
     for (const t of tindakans) {
       if (t.icd9) {
@@ -923,11 +894,7 @@ const getKunjunganFhirPreview = async (id) => {
     }
   }
 
-<<<<<<< Updated upstream
-  // 6. MedicationRequest Resource (Resep Obat)
-=======
   // 7. MedicationRequest Resource (Resep Obat KFA)
->>>>>>> Stashed changes
   if (resep && resep.length > 0) {
     for (const r of resep) {
       if (r.details) {
@@ -976,12 +943,6 @@ const getKunjunganFhirPreview = async (id) => {
           }
         }
       }
-<<<<<<< Updated upstream
-    }
-  }
-
-  // 7. CarePlan Resource (Plan & Rencana Terapi / Instruksi Medis Dokter)
-=======
 
       // 8. QuestionnaireResponse Resource (Pengkajian Resep Apoteker Section 15p Kemenkes v6.2)
       const questionnaireResponseResource = {
@@ -1030,7 +991,6 @@ const getKunjunganFhirPreview = async (id) => {
   }
 
   // 9. CarePlan Resource (Plan Rencana Terapi Dokter)
->>>>>>> Stashed changes
   if (rekamMedis && (rekamMedis.rencanaTerapi || rekamMedis.instruksiMedis)) {
     const carePlanResource = {
       resourceType: "CarePlan",
@@ -1060,11 +1020,7 @@ const getKunjunganFhirPreview = async (id) => {
     bundle.entry.push({ resource: carePlanResource });
   }
 
-<<<<<<< Updated upstream
-  // 8. ServiceRequest Resource (Rujukan Keluar RS)
-=======
   // 10. ServiceRequest Resource (Rujukan Keluar RS)
->>>>>>> Stashed changes
   if (rujukanKeluar) {
     const serviceRequestResource = {
       resourceType: "ServiceRequest",
@@ -1104,11 +1060,7 @@ const getKunjunganFhirPreview = async (id) => {
     bundle.entry.push({ resource: serviceRequestResource });
   }
 
-<<<<<<< Updated upstream
-  // 9. DiagnosticReport & Observation Resource (Hasil Laboratorium)
-=======
   // 11. DiagnosticReport & Observation Resource (Hasil Laboratorium)
->>>>>>> Stashed changes
   if (orderLab && orderLab.details && orderLab.details.length > 0) {
     const labObsResult = [];
     for (const d of orderLab.details) {
