@@ -2,6 +2,7 @@ const axios = require('axios');
 const crypto = require('crypto');
 const satusehatConfig = require('../config/satusehat');
 const { createFhirClient, generateAccessToken } = require('../utils/satusehat-client');
+const { buildRelatedPersonPayload } = require('../utils/fhir-mappers');
 
 /**
  * Search Patient by NIK (Nomor Induk Kependudukan)
@@ -38,6 +39,33 @@ const getPatientByNIK = async (nik) => {
     throw new Error('Terjadi kesalahan saat mencari pasien di SATUSEHAT');
   }
 };
+/**
+ * Search Patient (Ibu) by NIK Ibu
+ * @param {string} nikIbu - NIK Ibu Pasien
+ * @returns {Promise<Object>} Patient Data Ibu (termasuk IHS Number)
+ */
+const getPatientByNIKIbu = async (nikIbu) => {
+  try {
+    const fhirClient = await createFhirClient();
+    const response = await fhirClient.get(`/Patient?identifier=https://fhir.kemkes.go.id/id/nik-ibu|${nikIbu}`);
+    
+    if (response.data && response.data.entry && response.data.entry.length > 0) {
+      return {
+        success: true,
+        data: response.data.entry.map(e => e.resource),
+        total: response.data.total || response.data.entry.length
+      };
+    } else {
+      return {
+        success: false,
+        message: 'Pasien bayi baru lahir dengan NIK Ibu tersebut tidak ditemukan'
+      };
+    }
+  } catch (error) {
+    console.error(`[SATUSEHAT] Error searching patient by NIK Ibu ${nikIbu}:`, error.response?.data || error.message);
+    throw new Error('Terjadi kesalahan saat mencari pasien bayi di SATUSEHAT');
+  }
+};
 
 /**
  * Pendaftaran Pasien Baru ke SATUSEHAT
@@ -72,6 +100,36 @@ const createPatient = async (data) => {
     const errorMessage = issue?.diagnostics || issue?.details?.text || error.message;
     console.error(`[SATUSEHAT] Error creating patient for NIK ${data.nik}:`, error.response?.data ? JSON.stringify(error.response?.data, null, 2) : error.message);
     throw new Error(errorMessage || 'Terjadi kesalahan saat mendaftarkan pasien ke SATUSEHAT');
+  }
+};
+
+/**
+ * Step 2.b: POST RelatedPerson ke SATUSEHAT dan menautkannya dengan Ibu
+ * @param {Object} data - data bayi & ibu pasien
+ * @param {string} bayiIhs - Nomor IHS Bayi
+ * @param {string} ibuIhs - Nomor IHS Ibu
+ * @returns {Promise<Object>} Response dengan RelatedPerson ID
+ */
+const createRelatedPerson = async (data, bayiIhs, ibuIhs) => {
+  try {
+    const fhirClient = await createFhirClient();
+
+    const payload = buildRelatedPersonPayload(data, bayiIhs, ibuIhs);
+
+    console.log("[SATUSEHAT] Mengirim POST /RelatedPerson:", JSON.stringify(payload, null, 2));
+    const response = await fhirClient.post('/RelatedPerson', payload);
+
+    return {
+      success: true,
+      data: response.data,
+      relatedPersonId: response.data.id
+    };
+  } catch (error) {
+    console.error("[SATUSEHAT] Error creating RelatedPerson:", error.response?.data || error.message);
+    return {
+      success: false,
+      message: error.message
+    };
   }
 };
 
@@ -489,9 +547,11 @@ module.exports = {
   generateAccessToken,
   createFhirClient,
   getPatientByNIK,
+  getPatientByNIKIbu,
   getPractitionerByNIK,
   createLocation,
   createPatient,
+  createRelatedPerson,
   createEncounter,
   createObservation,
   createObservationBundle,

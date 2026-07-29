@@ -62,29 +62,33 @@ const buildEncounterPayload = (data, orgId) => {
         ]
       }
     }),
-    subject: {
-      reference: formatReference("Patient", data.pasienIhs),
-      display: data.pasienName
-    },
-    participant: [
-      {
-        type: [
-          {
-            coding: [
-              {
-                system: "http://terminology.hl7.org/CodeSystem/v3-ParticipationType",
-                code: data.peranDokter || "ATND",
-                display: data.peranDokter === 'CON' ? 'consultant' : (data.peranDokter === 'REF' ? 'referrer' : 'attender')
-              }
-            ]
-          }
-        ],
-        individual: {
-          reference: formatReference("Practitioner", data.dokterIhs),
-          display: data.dokterName
-        }
+    ...(data.pasienIhs && {
+      subject: {
+        reference: formatReference("Patient", data.pasienIhs),
+        display: data.pasienName
       }
-    ],
+    }),
+    ...(data.dokterIhs && {
+      participant: [
+        {
+          type: [
+            {
+              coding: [
+                {
+                  system: "http://terminology.hl7.org/CodeSystem/v3-ParticipationType",
+                  code: data.peranDokter || "ATND",
+                  display: data.peranDokter === 'CON' ? 'consultant' : (data.peranDokter === 'REF' ? 'referrer' : 'attender')
+                }
+              ]
+            }
+          ],
+          individual: {
+            reference: formatReference("Practitioner", data.dokterIhs),
+            display: data.dokterName
+          }
+        }
+      ]
+    }),
     period: {
       start: startEncounter,
       ...(endEncounter && { end: endEncounter })
@@ -98,14 +102,16 @@ const buildEncounterPayload = (data, orgId) => {
         }
       }
     ],
-    location: [
-      {
-        location: {
-          reference: formatReference("Location", data.poliIhs),
-          display: data.poliName
+    ...(data.poliIhs && {
+      location: [
+        {
+          location: {
+            reference: formatReference("Location", data.poliIhs),
+            display: data.poliName
+          }
         }
-      }
-    ],
+      ]
+    }),
     serviceProvider: {
       reference: formatReference("Organization", orgId)
     },

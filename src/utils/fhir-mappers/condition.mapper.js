@@ -78,10 +78,12 @@ const buildConditionPayload = (data) => {
     encounter: {
       reference: `Encounter/${data.encounterId}`
     },
-    recorder: {
-      reference: `Practitioner/${data.dokterIhs}`,
-      display: data.dokterName
-    }
+    ...(data.dokterIhs && data.dokterIhs !== 'undefined' && {
+      recorder: {
+        reference: `Practitioner/${data.dokterIhs}`,
+        ...(data.dokterName && { display: data.dokterName })
+      }
+    })
   };
 };
 

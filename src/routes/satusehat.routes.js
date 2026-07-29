@@ -17,7 +17,16 @@ router.post('/lokasi/poli/:id', satusehatController.syncPoliklinikLocation);
 // API to search KFA
 router.get('/kfa', satusehatController.searchKFA);
 
-// API to POST MedicationDispense
-router.post('/medication-dispense', satusehatController.dispenseMedication);
+// API to GET Encounter detail directly from SATUSEHAT
+router.get('/encounter/:encounterId', satusehatController.getEncounterDetail);
+
+// API to GET List of all Encounters for Monitoring
+router.get('/encounters', satusehatController.getMonitoringEncounters);
+
+// API to GET Resource (Observation, Condition, ClinicalImpression, Goal) by Encounter ID
+router.get('/resource-by-encounter/:resourceType/:encounterId', satusehatController.getResourceByEncounter);
+
+// API to retry sync Bundle for a kunjungan
+router.post('/kunjungan/:kunjunganId/sync', satusehatController.retrySyncEncounter);
 
 module.exports = router;

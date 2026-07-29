@@ -56,8 +56,7 @@ model Pasien {
   id              String      @id @default(cuid())
   noRM            String      @unique
   noIHS           String?     @unique
-  satusehat_ihs   String?
-  nik             String      @unique
+  nik             String?     @unique
   noKk            String?
   noPaspor        String?
   noKitas         String?
@@ -197,7 +196,7 @@ model Kunjungan {
   pasienId        String
   pasien          Pasien      @relation(fields: [pasienId], references: [id], onDelete: Cascade)
   
-  satusehatId     String?     @unique // ID Encounter dari SATUSEHAT (PONDASI UTAMA)
+  encounterId       String?     @unique // ID Encounter dari SATUSEHAT (PONDASI UTAMA)
 
   tanggalRegistrasi DateTime
   jamRegistrasi     String
@@ -214,9 +213,6 @@ model Kunjungan {
   caraDatang        String      // Datang sendiri, Ambulans, Rujukan
   
   noSep             String?
-  encounterId       String?     // ID Encounter dari SATUSEHAT
-  satusehatSync     Json?       // Tracking sinkronisasi SATUSEHAT
-  satusehat_encounter_id String?
   satusehat_sync_status  String   @default("PENDING")
   satusehat_last_error    String?  @db.Text
 
@@ -351,6 +347,7 @@ model Screening {
   catatanPetugas      String?
 
   observationIds      Json?     // Array of SATUSEHAT Observation UUIDs
+  headToToe           Json?     // Object penampung 28 organ pemeriksaan fisik Head to Toe (SATUSEHAT)
 
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt

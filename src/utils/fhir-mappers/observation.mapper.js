@@ -31,12 +31,14 @@ const buildObservationPayload = (data) => {
     encounter: {
       reference: `Encounter/${data.encounterId}`
     },
-    performer: [
-      {
-        reference: `Practitioner/${data.dokterIhs}`,
-        display: data.dokterName
-      }
-    ],
+    ...(data.dokterIhs && data.dokterIhs !== 'undefined' && {
+      performer: [
+        {
+          reference: `Practitioner/${data.dokterIhs}`,
+          ...(data.dokterName && { display: data.dokterName })
+        }
+      ]
+    }),
     effectiveDateTime: startEncounter
   };
 

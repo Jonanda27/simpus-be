@@ -1,6 +1,8 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 const satusehatService = require('../services/satusehat.service');
+const SatuSehatGateway = require('../services/satusehat/gateway.service');
+const { toRawatJalanBundle } = require('../utils/fhir-mappers');
 
 // 1. Get Antrian Farmasi (MENUNGGU_FARMASI)
 exports.getAntrianFarmasi = async (req, res) => {
@@ -110,6 +112,15 @@ exports.prosesResep = async (req, res) => {
         throw new Error('Resep ini sudah diproses sebelumnya');
       }
 
+      // Pengecekan pembayaran di Kasir (Kecuali Pasien BPJS/Gratis)
+      const tagihan = await tx.tagihan.findUnique({
+        where: { kunjunganId: resep.kunjunganId }
+      });
+
+      if (tagihan && tagihan.statusTagihan !== 'LUNAS' && resep.kunjungan.jenisPenjamin !== 'BPJS') {
+        throw new Error('Pasien belum melakukan pembayaran di Kasir. Mohon arahkan pasien ke Kasir terlebih dahulu.');
+      }
+
       // 2. Kurangi stok obat
       for (const detail of resep.details) {
         const obatLama = await tx.masterObat.findUnique({
@@ -150,56 +161,76 @@ exports.prosesResep = async (req, res) => {
     });
 
     // -------------------------------------
-    // Sinkronisasi SATUSEHAT (Luar transaksi)
+    // Sinkronisasi SATUSEHAT Bundle Transaction (Luar transaksi)
     // -------------------------------------
     const resep = result.resepLengkap;
-    let medCount = 0;
-    for (const detail of resep.details) {
-      if (detail.obat && detail.obat.kodeObat && resep.kunjungan.encounterId && resep.pasien.noIHS && resep.dokter.tenagaMedis?.noIHS) {
-        try {
-          await satusehatService.postMedicationDispense({
-            resepId: resep.id,
-            resepDetailId: `${resep.id}-${detail.obat.id}`,
-            kodeObat: detail.obat.kodeObat,
-            namaObat: detail.obat.namaObat,
-            sediaan: detail.obat.sediaan,
-            pasienIhs: resep.pasien.noIHS,
-            pasienName: resep.pasien.namaLengkap,
-            practitionerIhs: resep.dokter.tenagaMedis.noIHS,
-            practitionerName: resep.dokter.namaLengkap,
-            encounterId: resep.kunjungan.encounterId,
-            locationId: resep.kunjungan.poliklinik.ihsLocationId,
-            locationName: resep.kunjungan.poliklinik.namaPoli,
-            jumlah: detail.jumlah,
-            jumlahHari: 3, // Asumsi standar jika tidak ada data durasi hari
-            instruksi: detail.aturanPakai,
-            frekuensi: 3, 
-            dosis: 1
-          });
-          medCount++;
-        } catch (err) {
-          console.error(`Error sync MedicationDispense SATUSEHAT untuk Obat ${detail.obat.kodeObat}:`, err.message);
+    
+    try {
+      // Ambil data kunjungan lengkap beserta seluruh relasi medis
+      const dataComplete = await prisma.kunjungan.findUnique({
+        where: { id: resep.kunjunganId },
+        include: {
+          pasien: true,
+          poliklinik: true,
+          screening: true,
+          rekamMedis: true,
+          persetujuan: true,
+          diagnosis: { include: { icd10: true } },
+          tindakans: { include: { icd9: true } },
+          resep: {
+            include: {
+              details: { include: { obat: true } }
+            }
+          },
+          dokterTujuan: { include: { tenagaMedis: true } }
         }
-      }
-    }
+      });
 
-    // Update status SATUSEHAT di Kunjungan
-    if (medCount > 0) {
-      const syncStatus = (typeof resep.kunjungan.satusehatSync === 'object' && resep.kunjungan.satusehatSync !== null) 
-        ? { ...resep.kunjungan.satusehatSync } 
-        : {};
-      
-      syncStatus.MedicationDispense = { status: 'SUCCESS', detail: `Sent ${medCount} dispenses` };
-      
+      if (dataComplete && dataComplete.persetujuan?.persetujuanSatusehat !== false) {
+        // Ekstrak detail resep
+        const resepDetails = [];
+        if (Array.isArray(dataComplete.resep)) {
+          dataComplete.resep.forEach((r) => {
+            if (Array.isArray(r.details)) {
+              r.details.forEach((d) => resepDetails.push({ ...d, resepId: r.id }));
+            }
+          });
+        }
+
+        const completePayload = {
+          ...dataComplete,
+          resepDetails,
+          encounterId: dataComplete.encounterId
+        };
+
+        // Rakit Bundle Transaction Payload
+        const bundlePayload = toRawatJalanBundle(completePayload);
+        console.log(`[Farmasi SATUSEHAT] 🚀 Mengirim Bundle Transaction Lengkap untuk Kunjungan ID: ${resep.kunjunganId}...`);
+        
+        await SatuSehatGateway.sendBundleTransaction(bundlePayload);
+        
+        await prisma.kunjungan.update({
+          where: { id: resep.kunjunganId },
+          data: {
+            satusehat_sync_status: 'SUCCESS',
+            satusehat_last_error: null
+          }
+        });
+      }
+    } catch (ssErr) {
+      console.error(`[Farmasi SATUSEHAT Error] Gagal mengirim Bundle Transaction:`, ssErr.message || ssErr);
       await prisma.kunjungan.update({
         where: { id: resep.kunjunganId },
-        data: { satusehatSync: syncStatus }
+        data: {
+          satusehat_sync_status: 'FAILED',
+          satusehat_last_error: ssErr.message || String(ssErr)
+        }
       });
     }
 
     res.json({
       status: 'success',
-      message: 'Resep berhasil diproses, stok obat telah dikurangi, dan pasien diarahkan ke Kasir.',
+      message: 'Resep berhasil diproses, stok obat telah dikurangi, dan data SATUSEHAT terintegrasi.',
       data: result.updatedResep
     });
   } catch (error) {

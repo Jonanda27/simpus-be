@@ -35,17 +35,19 @@ const buildProcedurePayload = (data, orgId) => {
       reference: `Encounter/${data.encounterId}`
     },
     performedDateTime: data.waktuTindakan || new Date().toISOString(),
-    performer: [
-      {
-        actor: {
-          reference: `Practitioner/${data.dokterIhs}`,
-          display: data.dokterName
-        },
-        onBehalfOf: {
-          reference: `Organization/${orgId}`
+    ...(data.dokterIhs && data.dokterIhs !== 'undefined' && {
+      performer: [
+        {
+          actor: {
+            reference: `Practitioner/${data.dokterIhs}`,
+            ...(data.dokterName && { display: data.dokterName })
+          },
+          onBehalfOf: {
+            reference: `Organization/${orgId}`
+          }
         }
-      }
-    ]
+      ]
+    })
   };
 };
 

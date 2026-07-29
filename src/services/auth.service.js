@@ -40,6 +40,7 @@ const loginUser = async (username, password) => {
     user: {
       id: user.id,
       username: user.username,
+      namaLengkap: user.namaLengkap,
       role: user.role,
       poliklinikId: user.poliklinikId,
       poliklinik: user.poliklinik
@@ -53,6 +54,7 @@ const getUserById = async (id) => {
     select: { 
       id: true, 
       username: true, 
+      namaLengkap: true,
       role: true,
       poliklinikId: true,
       poliklinik: true 

@@ -11,6 +11,7 @@ const { buildCompositionPayload } = require('./composition.mapper');
 const { buildClinicalImpressionPayload } = require('./clinical-impression.mapper');
 const { buildServiceRequestPayload } = require('./service-request.mapper');
 const { buildSpecimenPayload } = require('./specimen.mapper');
+const { buildRelatedPersonPayload } = require('./related-person.mapper');
 const { toRawatJalanBundle } = require('./bundle.mapper');
 
 module.exports = {
@@ -28,5 +29,6 @@ module.exports = {
   buildClinicalImpressionPayload,
   buildServiceRequestPayload,
   buildSpecimenPayload,
+  buildRelatedPersonPayload,
   toRawatJalanBundle
 };

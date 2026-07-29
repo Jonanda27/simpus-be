@@ -41,12 +41,14 @@ const buildCompositionPayload = (data, orgId) => {
       reference: `Encounter/${data.encounterId}`
     },
     date: dateStr,
-    author: [
-      {
-        reference: `Practitioner/${data.dokterIhs}`,
-        display: data.dokterName
-      }
-    ],
+    ...(data.dokterIhs && data.dokterIhs !== 'undefined' && {
+      author: [
+        {
+          reference: `Practitioner/${data.dokterIhs}`,
+          ...(data.dokterName && { display: data.dokterName })
+        }
+      ]
+    }),
     title: data.title || "Resume Medis Pasien",
     custodian: {
       reference: `Organization/${orgId}`

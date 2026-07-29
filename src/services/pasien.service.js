@@ -41,26 +41,65 @@ const createPasien = async (data) => {
   }
 
   let newIhs = data.noIHS;
-  if (!newIhs && data.nik) {
+  let ibuIhs = null;
+
+  const isBayiReg = Boolean(data.isBayi || data.nikIbu);
+  data.isBayi = isBayiReg;
+
+  if (isBayiReg && data.nikIbu) {
     try {
-      if (data.isBayi) {
-        // Bayi belum punya NIK, jadi kita lewati tahap GET Patient By NIK
-        // Langsung POST pendaftaran karena kita menggunakan NIK Ibunya
+      // LANGKAH 1: GET informasi Ibu pasien dari SATUSEHAT by NIK Ibu
+      const checkIbuRes = await satusehatService.getPatientByNIK(data.nikIbu);
+      if (checkIbuRes.success && checkIbuRes.ihsNumber) {
+        ibuIhs = checkIbuRes.ihsNumber;
+        console.log(`[SATUSEHAT Bayi] Data Ibu ditemukan dengan Nomor IHS: ${ibuIhs}`);
+      } else {
+        console.log(`[SATUSEHAT Bayi] Data Ibu belum ada di SATUSEHAT, mendaftarkan Ibu via NIK ${data.nikIbu}...`);
+        // LANGKAH 1.a: POST Create Patient record untuk Ibu jika belum ada
+        const createIbuRes = await satusehatService.createPatient({
+          nik: data.nikIbu,
+          namaLengkap: data.namaIbu || `Ibu dari ${data.namaLengkap}`,
+          jenisKelamin: 'Perempuan',
+          tanggalLahir: '1995-01-01', // Fallback default jika tidak ada tgl lahir ibu
+          kewarganegaraan: 'WNI',
+          statusPerkawinan: 'Kawin',
+          alamatKtp: data.alamatKtp,
+          provinsi: data.provinsi,
+          kabupatenKota: data.kabupatenKota,
+          kecamatan: data.kecamatan,
+          desaKelurahan: data.desaKelurahan,
+          noHp: data.noHp
+        });
+        if (createIbuRes.success && createIbuRes.ihsNumber) {
+          ibuIhs = createIbuRes.ihsNumber;
+        }
+      }
+
+      // LANGKAH 2.a: POST Informasi Pasien Bayi Baru Lahir ke SATUSEHAT (System: nik-ibu, maritalStatus: S)
+      const postBayiRes = await satusehatService.createPatient(data);
+      if (postBayiRes.success && postBayiRes.ihsNumber) {
+        newIhs = postBayiRes.ihsNumber;
+        console.log(`[SATUSEHAT Bayi] Berhasil mendaftarkan Bayi Baru Lahir dengan Nomor IHS: ${newIhs}`);
+
+        // LANGKAH 2.b: POST Create record RelatedPerson (Hubungkan Bayi dengan Ibu - MTH)
+        if (data.namaIbu) {
+          await satusehatService.createRelatedPerson(data, newIhs, ibuIhs);
+        }
+      }
+    } catch (e) {
+      console.error("[SATUSEHAT Bayi] Error Alur Pendaftaran Bayi Baru Lahir:", e.message);
+    }
+  } else if (!newIhs && data.nik) {
+    try {
+      // Cek apakah NIK sudah ada di SATUSEHAT
+      const checkRes = await satusehatService.getPatientByNIK(data.nik);
+      if (checkRes.success && checkRes.ihsNumber) {
+        newIhs = checkRes.ihsNumber;
+      } else {
+        // Jika tidak ada, daftarkan pasien baru ke SATUSEHAT
         const postRes = await satusehatService.createPatient(data);
         if (postRes.success && postRes.ihsNumber) {
           newIhs = postRes.ihsNumber;
-        }
-      } else {
-        // Cek apakah NIK sudah ada di SATUSEHAT
-        const checkRes = await satusehatService.getPatientByNIK(data.nik);
-        if (checkRes.success && checkRes.ihsNumber) {
-          newIhs = checkRes.ihsNumber;
-        } else {
-          // Jika tidak ada, daftarkan pasien baru ke SATUSEHAT
-          const postRes = await satusehatService.createPatient(data);
-          if (postRes.success && postRes.ihsNumber) {
-            newIhs = postRes.ihsNumber;
-          }
         }
       }
     } catch (e) {
@@ -71,17 +110,67 @@ const createPasien = async (data) => {
   // Gunakan transaksi untuk memastikan semua data tersimpan atau tidak sama sekali (atomic)
   const newPasien = await prisma.$transaction(async (tx) => {
     
-    // 1. Cari Pasien Lama atau Buat Baru
-    let pasien = await tx.pasien.findUnique({
-      where: { nik: data.nik }
-    });
+    // Jika Pendaftaran Bayi Baru Lahir, simpan/pastikan data IBU tersimpan di Master Data Pasien
+    if (data.isBayi && data.nikIbu) {
+      const ibuExisting = await tx.pasien.findUnique({
+        where: { nik: data.nikIbu }
+      });
+
+      if (!ibuExisting) {
+        await tx.pasien.create({
+          data: {
+            noRM: `RM-IBU-${Math.floor(Math.random() * 1000000)}`,
+            noIHS: ibuIhs || null,
+            nik: data.nikIbu,
+            noKk: data.noKk,
+            namaLengkap: data.namaIbu || `Ny. Ibu dari ${data.namaLengkap}`,
+            tempatLahir: data.tempatLahir || "Sesuai Ibu",
+            tanggalLahir: new Date("1995-01-01"),
+            jenisKelamin: "Perempuan",
+            agama: data.agama || "Islam",
+            pekerjaan: "Ibu Rumah Tangga",
+            statusPerkawinan: "Kawin",
+            kewarganegaraan: "WNI",
+            alamat: {
+              create: {
+                alamatKtp: data.alamatKtp,
+                alamatDomisili: data.alamatDomisili,
+                rtRw: data.rtRw,
+                desaKelurahan: data.desaKelurahan,
+                kecamatan: data.kecamatan,
+                kabupatenKota: data.kabupatenKota,
+                provinsi: data.provinsi,
+                kodePos: data.kodePos
+              }
+            },
+            kontak: {
+              create: {
+                noHp: data.noHp || "-",
+                kontakDarurat: data.namaAyah || "-",
+                hubunganKontakDarurat: "Suami",
+                noHpDarurat: data.noHpDarurat || "-"
+              }
+            }
+          }
+        });
+        console.log(`[Master Data Pasien] Berhasil mendaftarkan Ibu (${data.namaIbu}) ke tabel Master Pasien`);
+      }
+    }
+
+    // 1. Cari Pasien Lama (jika NIK diisi untuk non-bayi) atau Buat Pasien Baru untuk BAYI
+    let pasien = null;
+    if (data.nik && !data.isBayi) {
+      pasien = await tx.pasien.findUnique({
+        where: { nik: data.nik }
+      });
+    }
 
     if (!pasien) {
       pasien = await tx.pasien.create({
         data: {
           noRM: data.noRekamMedis,
           noIHS: newIhs || null,
-          nik: data.nik,
+          nik: data.nik || null,
           noKk: data.noKk,
           namaLengkap: data.namaLengkap,
           tempatLahir: data.tempatLahir,
@@ -126,7 +215,7 @@ const createPasien = async (data) => {
             }
           },
           // Data Bayi (Opsional)
-          ...(data.isBayi ? {
+          ...((data.isBayi || Boolean(data.nikIbu)) ? {
             dataBayi: {
               create: {
                 namaIbu: data.namaIbu,
@@ -135,7 +224,9 @@ const createPasien = async (data) => {
                 beratLahir: data.beratLahir,
                 panjangLahir: data.panjangLahir,
                 jamLahir: data.jamLahir,
-                jenisPersalinan: data.jenisPersalinan
+                jenisPersalinan: data.jenisPersalinan,
+                urutanKelahiran: data.urutanKelahiran !== undefined ? Number(data.urutanKelahiran) : 0,
+                isKelahiranGanda: (data.urutanKelahiran && Number(data.urutanKelahiran) > 0) ? true : false
               }
             }
           } : {}),
@@ -153,6 +244,37 @@ const createPasien = async (data) => {
           }
         }
       });
+    } else {
+      // Jika pasien sudah ada, namun mendaftar sebagai bayi, buat/update DataBayi-nya
+      if (data.isBayi || Boolean(data.nikIbu)) {
+        await tx.dataBayi.upsert({
+          where: { pasienId: pasien.id },
+          create: {
+            pasienId: pasien.id,
+            namaIbu: data.namaIbu,
+            nikIbu: data.nikIbu,
+            namaAyah: data.namaAyah,
+            beratLahir: data.beratLahir,
+            panjangLahir: data.panjangLahir,
+            jamLahir: data.jamLahir,
+            jenisPersalinan: data.jenisPersalinan,
+            urutanKelahiran: data.urutanKelahiran !== undefined ? Number(data.urutanKelahiran) : 0,
+            isKelahiranGanda: (data.urutanKelahiran && Number(data.urutanKelahiran) > 0) ? true : false
+          },
+          update: {
+            namaIbu: data.namaIbu,
+            nikIbu: data.nikIbu,
+            namaAyah: data.namaAyah,
+            beratLahir: data.beratLahir,
+            panjangLahir: data.panjangLahir,
+            jamLahir: data.jamLahir,
+            jenisPersalinan: data.jenisPersalinan,
+            urutanKelahiran: data.urutanKelahiran !== undefined ? Number(data.urutanKelahiran) : 0,
+            isKelahiranGanda: (data.urutanKelahiran && Number(data.urutanKelahiran) > 0) ? true : false
+          }
+        });
+        console.log(`[Master Data Bayi] Upsert DataBayi untuk Pasien ID: ${pasien.id}`);
+      }
     }
 
     // 0. Generate Nomor Antrean (Opsional jika poliTujuan ada)
@@ -233,7 +355,8 @@ const createPasien = async (data) => {
     });
 
     // 3. Create Encounter di SATUSEHAT
-    if (data.persetujuanSatusehat && pasien.noIHS && data.dokterTujuan !== 'Bebas') {
+    const effectiveIhs = newIhs || pasien.noIHS;
+    if (data.persetujuanSatusehat && effectiveIhs && data.dokterTujuan !== 'Bebas') {
       try {
         const dokter = await tx.user.findUnique({
           where: { id: data.dokterTujuan },
@@ -242,7 +365,7 @@ const createPasien = async (data) => {
 
         if (dokter && dokter.tenagaMedis && dokter.tenagaMedis.noIHS && poliklinik && poliklinik.ihsLocationId) {
           const encounterResult = await satusehatService.createEncounter({
-            pasienIhs: pasien.noIHS,
+            pasienIhs: effectiveIhs,
             pasienName: pasien.namaLengkap,
             dokterIhs: dokter.tenagaMedis.noIHS,
             dokterName: dokter.namaLengkap,
@@ -253,26 +376,30 @@ const createPasien = async (data) => {
             peranDokter: 'ATND' // Default ke Attending Physician
           });
 
-          if (encounterResult.success) {
-            // Update kunjungan with encounterId and satusehatSync
-            const syncData = {
-              Encounter: { status: 'SUCCESS', id: encounterResult.encounterId }
-            };
+          if (encounterResult.success && encounterResult.encounterId) {
             await tx.kunjungan.update({
               where: { id: kunjungan.id },
               data: { 
                 encounterId: encounterResult.encounterId,
-                satusehatSync: syncData
+                satusehat_sync_status: 'SUCCESS',
+                satusehat_last_error: null
               }
             });
             kunjungan.encounterId = encounterResult.encounterId;
+            kunjungan.satusehat_sync_status = 'SUCCESS';
           }
         }
       } catch (error) {
-        console.error('Failed to create Encounter in SATUSEHAT:', error);
-        // We don't throw here to ensure local registration still succeeds
+        console.error('Failed to create Encounter in SATUSEHAT:', error.message || error);
+        await tx.kunjungan.update({
+          where: { id: kunjungan.id },
+          data: { 
+            satusehat_sync_status: 'FAILED',
+            satusehat_last_error: error.message || String(error)
+          }
+        });
       }
-    } // End if (data.poliTujuan)
+    } // End if (data.persetujuanSatusehat)
     }
 
     // ================================================================
@@ -358,6 +485,7 @@ const searchPasien = async (query) => {
       kontak: true,
       sosial: true,
       penjamin: true,
+      dataBayi: true,
     }
   });
 };

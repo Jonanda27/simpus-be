@@ -18,6 +18,7 @@ const radiologiRoute = require('./radiologi.routes'); // [BARU] Import module ra
 const satusehatRoute = require('./satusehat.routes');
 const bpjsRoute = require('./bpjs.routes'); // [BARU] Import module BPJS PCare
 const referensiRoute = require('./referensi.routes'); // [BARU] Import module Referensi Enum
+const kodeposRoute = require('./kodepos.routes');
 const router = express.Router();
 const imunisasiRoute = require('./imunisasi.routes');
 
@@ -101,6 +102,10 @@ const defaultRoutes = [
   {
     path: '/referensi',
     route: referensiRoute,
+  },
+  {
+    path: '/kodepos',
+    route: kodeposRoute,
   }
 ];
 

@@ -93,6 +93,29 @@ class SatuSehatGateway {
     }
 
     /**
+     * [READ] Fungsi generik untuk mengambil data FHIR dari SATUSEHAT berdasarkan ResourceType dan ID
+     * @param {string} resourceType - Nama endpoint (Contoh: 'Encounter', 'Patient', 'Observation')
+     * @param {string} id - ID SATUSEHAT
+     */
+    static async getResource(resourceType, id) {
+        try {
+            const token = await this.getAccessToken();
+            const baseUrl = satusehatConfig?.SATUSEHAT_URL?.FHIR_URL || process.env.SATUSEHAT_BASE_URL;
+
+            const response = await axios.get(`${baseUrl}/${resourceType}/${id}`, {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                },
+            });
+
+            return response.data;
+        } catch (error) {
+            this._handleError(error, `GET ${resourceType}/${id}`);
+        }
+    }
+
+    /**
      * [UPDATE] Fungsi generik untuk memperbarui data EKSISTING di SATUSEHAT
      * @param {string} resourceType - Nama endpoint
      * @param {string} id - ID SATUSEHAT dari resource yang mau diubah
@@ -117,6 +140,57 @@ class SatuSehatGateway {
     }
 
     /**
+     * [SEARCH RESOURCE BY ENCOUNTER] Ambil FHIR Resource (Observation, Condition, dll) berdasarkan Encounter ID
+     * @param {string} resourceType - Tipe Resource (Observation, Condition, ClinicalImpression, Goal)
+     * @param {string} encounterId - ID Encounter SATUSEHAT
+     * @returns {Promise<Object>} Response dari SATUSEHAT
+     */
+    static async getResourceByEncounter(resourceType, encounterId) {
+        try {
+            const token = await this.getAccessToken();
+            const baseUrl = satusehatConfig?.SATUSEHAT_URL?.FHIR_URL || process.env.SATUSEHAT_BASE_URL;
+
+            const url = `${baseUrl}/${resourceType}?encounter=${encounterId}`;
+            const response = await axios.get(url, {
+                headers: {
+                    'Authorization': `Bearer ${token}`
+                }
+            });
+
+            return response.data;
+        } catch (error) {
+            this._handleError(error, `Get ${resourceType} by Encounter ID (${encounterId})`);
+        }
+    }
+
+    /**
+     * [SEARCH RESOURCE BY SUBJECT] Ambil FHIR Resource berdasarkan Patient IHS (untuk Goal dll yang tidak support ?encounter=)
+     * @param {string} resourceType - Tipe Resource (Goal)
+     * @param {string} patientIhs - Patient IHS Number
+     * @returns {Promise<Object>} Response dari SATUSEHAT
+     */
+    static async getResourceBySubject(resourceType, patientIhs) {
+        try {
+            const token = await this.getAccessToken();
+            const baseUrl = satusehatConfig?.SATUSEHAT_URL?.FHIR_URL || process.env.SATUSEHAT_BASE_URL;
+
+            // FamilyMemberHistory & MedicationStatement terkadang menggunakan ?patient= (Patient/{IHS})
+            const paramName = (resourceType === 'FamilyMemberHistory') ? 'patient' : 'subject';
+            const url = `${baseUrl}/${resourceType}?${paramName}=Patient/${patientIhs}`;
+            
+            const response = await axios.get(url, {
+                headers: {
+                    'Authorization': `Bearer ${token}`
+                }
+            });
+
+            return response.data;
+        } catch (error) {
+            this._handleError(error, `Get ${resourceType} by Patient IHS (${patientIhs})`);
+        }
+    }
+
+    /**
      * [HELPER] Private method untuk standarisasi Error Handling & OperationOutcome parsing
      */
     static _handleError(error, action) {
@@ -126,7 +200,9 @@ class SatuSehatGateway {
         let errorMessage = `Gagal melakukan ${action} ke SATUSEHAT`;
 
         if (responseData) {
-            if (responseData.resourceType === 'OperationOutcome' && Array.isArray(responseData.issue)) {
+            if (responseData.fault && responseData.fault.detail?.errorcode === 'policies.ratelimit.QuotaViolation') {
+                errorMessage = 'Batas Kuota (Rate Limit Quota) Staging SATUSEHAT Kemenkes telah terlampaui untuk saat ini. Mohon tunggu beberapa saat.';
+            } else if (responseData.resourceType === 'OperationOutcome' && Array.isArray(responseData.issue)) {
                 const issues = responseData.issue
                     .map(i => i.diagnostics || i.details?.text || i.code)
                     .filter(Boolean)

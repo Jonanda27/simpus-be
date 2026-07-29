@@ -3,6 +3,7 @@ const ukmService = require('./ukm.service');
 const satusehatService = require('./satusehat.service');
 const SatuSehatGateway = require('./satusehat/gateway.service');
 const { toRawatJalanBundle } = require('../utils/fhir-mappers');
+const kasirService = require('./kasir.service');
 const { addSatusehatSyncJob } = require('../queues/satusehat.queue');
 
 /**
@@ -76,6 +77,36 @@ const extractObservationsFromScreening = (screening) => {
       value: screening.beratBadan,
       unit: "kg",
       unitCode: "kg"
+    });
+  }
+
+  if (screening.saturasiOksigen) {
+    obs.push({
+      loincCode: "59408-5",
+      loincDisplay: "Oxygen saturation in Arterial blood by Pulse oximetry",
+      value: screening.saturasiOksigen,
+      unit: "%",
+      unitCode: "%"
+    });
+  }
+
+  if (screening.lingkarPerut) {
+    obs.push({
+      loincCode: "8280-0",
+      loincDisplay: "Waist Circumference",
+      value: screening.lingkarPerut,
+      unit: "cm",
+      unitCode: "cm"
+    });
+  }
+
+  if (screening.skalaNyeri !== undefined && screening.skalaNyeri !== null) {
+    obs.push({
+      loincCode: "72514-3",
+      loincDisplay: "Pain severity - 0-10 verbal numeric rating",
+      value: screening.skalaNyeri,
+      unit: "{score}",
+      unitCode: "{score}"
     });
   }
 
@@ -481,11 +512,11 @@ const simpanAlergi = async (kunjunganId, alergiArr, user) => {
 };
 
 /**
- * Selesaikan pemeriksaan: update status RekamMedis + Kunjungan
- * Dan trigger FHIR Transaction Bundle ke SATUSEHAT
+ * Selesaikan pemeriksaan: update status RekamMedis saja.
+ * Bundle SATUSEHAT TIDAK dikirim di sini.
+ * Bundle akan dikirim saat tindak lanjut pasien (Resep → Farmasi, Rujukan, atau Pulang).
  */
 const selesaikanPemeriksaan = async (kunjunganId, user) => {
-  // 1. Selesaikan transaksi medis lokal (RekamMedis & Kunjungan)
   const rm = await prisma.$transaction(async (tx) => {
     const updateData = { statusPemeriksaan: 'SELESAI' };
     if (user && user.role === 'PERAWAT') {
@@ -497,11 +528,11 @@ const selesaikanPemeriksaan = async (kunjunganId, user) => {
       data: updateData,
     });
 
+    // Status kunjungan belum SELESAI, menunggu tindak lanjut (Resep/Rujukan/Pulang)
     await tx.kunjungan.update({
       where: { id: kunjunganId },
       data: { 
-        statusKunjungan: 'SELESAI',
-        waktuDischarge: new Date(),
+        statusKunjungan: 'MENUNGGU_TINDAK_LANJUT',
         satusehat_sync_status: 'PENDING'
       },
     });
@@ -509,36 +540,8 @@ const selesaikanPemeriksaan = async (kunjunganId, user) => {
     return updatedRm;
   });
 
-  // 2. Lempar job asinkron ke Redis Queue (BullMQ)
-  let syncStatus = 'PENDING';
-  let lastError = null;
-
-  try {
-    await addSatusehatSyncJob(kunjunganId);
-    console.log(`[SATUSEHAT RawatJalan] Job sinkronisasi kunjungan ${kunjunganId} berhasil didaftarkan ke Redis Queue.`);
-  } catch (error) {
-    syncStatus = 'FAILED';
-    lastError = error.message || String(error);
-    console.error(`[Queue Error] Gagal mendaftarkan job SATUSEHAT untuk kunjungan ${kunjunganId}:`, lastError);
-
-    try {
-      await prisma.kunjungan.update({
-        where: { id: kunjunganId },
-        data: {
-          satusehat_sync_status: 'FAILED',
-          satusehat_last_error: lastError
-        }
-      });
-    } catch (dbErr) {
-      console.error(`[DB Error] Gagal update status error queue ke DB:`, dbErr.message);
-    }
-  }
-
-  return {
-    rekamMedis: rm,
-    satusehat_sync_status: syncStatus,
-    satusehat_last_error: lastError
-  };
+  console.log(`[Rawat Jalan] Pemeriksaan selesai untuk kunjungan ${kunjunganId}. Menunggu tindak lanjut (Resep/Rujukan/Pulang).`);
+  return rm;
 };
 
 /**
@@ -605,6 +608,79 @@ const getTindakanByKunjungan = async (kunjunganId) => {
 };
 
 /**
+ * Helper internal untuk mengirim Bundle Transaction ke SATUSEHAT
+ */
+const sendBundleForKunjungan = async (kunjunganId) => {
+  try {
+    const dataComplete = await prisma.kunjungan.findUnique({
+      where: { id: kunjunganId },
+      include: {
+        pasien: true,
+        poliklinik: true,
+        screening: true,
+        rekamMedis: true,
+        persetujuan: true,
+        diagnosis: { include: { icd10: true } },
+        tindakans: { include: { icd9: true } },
+        resep: {
+          include: {
+            details: { include: { obat: true } }
+          }
+        },
+        dokterTujuan: { include: { tenagaMedis: true } }
+      }
+    });
+
+    if (!dataComplete || dataComplete.persetujuan?.persetujuanSatusehat === false) {
+      console.log(`[SATUSEHAT Sync] Kunjungan ${kunjunganId} di-skip.`);
+      return;
+    }
+
+    const resepDetails = [];
+    if (Array.isArray(dataComplete.resep)) {
+      dataComplete.resep.forEach((r) => {
+        if (Array.isArray(r.details)) {
+          r.details.forEach((d) => resepDetails.push({ ...d, resepId: r.id }));
+        }
+      });
+    }
+
+    const observations = extractObservationsFromScreening(dataComplete.screening);
+
+    const completePayload = {
+      ...dataComplete,
+      observations,
+      resepDetails,
+      encounterId: dataComplete.encounterId
+    };
+
+    const bundlePayload = toRawatJalanBundle(completePayload);
+    console.log(`[SATUSEHAT Bundle] 🚀 Mengirim Bundle untuk Kunjungan ID: ${kunjunganId}...`);
+
+    const response = await SatuSehatGateway.sendBundleTransaction(bundlePayload);
+
+    await prisma.kunjungan.update({
+      where: { id: kunjunganId },
+      data: {
+        satusehat_sync_status: 'SUCCESS',
+        satusehat_last_error: null
+      }
+    });
+
+    console.log(`[SATUSEHAT Sync] ✅ Berhasil sync bundle untuk kunjungan ${kunjunganId}`);
+  } catch (syncError) {
+    console.error(`[SATUSEHAT Bundle Error] Gagal mengirim Bundle:`, syncError.message || syncError);
+    await prisma.kunjungan.update({
+      where: { id: kunjunganId },
+      data: {
+        satusehat_sync_status: 'FAILED',
+        satusehat_last_error: syncError.message || String(syncError)
+      }
+    });
+  }
+};
+
+/**
  * Simpan Resep
  */
 const simpanResep = async (kunjunganId, user, resepArr) => {
@@ -648,14 +724,22 @@ const simpanResep = async (kunjunganId, user, resepArr) => {
 
     await tx.resepDetail.createMany({ data: details });
 
-    // Akhiri kunjungan dari poli
+    // Status kunjungan ke MENUNGGU_FARMASI (Bundle dikirim saat penyerahan obat di Farmasi)
     await tx.kunjungan.update({
       where: { id: kunjunganId },
-      data: { statusKunjungan: 'MENUNGGU_KASIR' },
+      data: { statusKunjungan: 'MENUNGGU_FARMASI' },
     });
 
     return { resep, details };
   });
+
+  // Generate tagihan kasir secara otomatis (termasuk item obat & tindakan)
+  try {
+    await kasirService.generateTagihan(kunjunganId);
+    console.log(`[Kasir] Tagihan berhasil dibuat untuk kunjungan ${kunjunganId}`);
+  } catch (errTagihan) {
+    console.error(`[Kasir Error] Gagal generate tagihan:`, errTagihan.message);
+  }
 
   return result.resep;
 };
@@ -667,8 +751,8 @@ const simpanRujukan = async (kunjunganId, dokterId, rujukanData) => {
   const kunjungan = await prisma.kunjungan.findUnique({ where: { id: kunjunganId } });
   if (!kunjungan) throw new Error('Kunjungan tidak ditemukan');
 
-  return await prisma.$transaction(async (tx) => {
-    const rujukan = await tx.rujukanKeluar.create({
+  const rujukan = await prisma.$transaction(async (tx) => {
+    const res = await tx.rujukanKeluar.create({
       data: {
         kunjunganId,
         pasienId: kunjungan.pasienId,
@@ -679,24 +763,47 @@ const simpanRujukan = async (kunjunganId, dokterId, rujukanData) => {
       },
     });
 
-    // Akhiri kunjungan dari poli
     await tx.kunjungan.update({
       where: { id: kunjunganId },
-      data: { statusKunjungan: 'MENUNGGU_KASIR' },
+      data: { statusKunjungan: 'MENUNGGU_KASIR', waktuDischarge: new Date() },
     });
 
-    return rujukan;
+    return res;
   });
+
+  // Generate tagihan kasir secara otomatis
+  try {
+    await kasirService.generateTagihan(kunjunganId);
+  } catch (errTagihan) {
+    console.error(`[Kasir Error] Gagal generate tagihan:`, errTagihan.message);
+  }
+
+  // Kirim Bundle SATUSEHAT untuk kasus Rujukan
+  sendBundleForKunjungan(kunjunganId);
+
+  return rujukan;
 };
 
 /**
  * Pulang tanpa resep/rujukan
  */
 const pulang = async (kunjunganId) => {
-  return await prisma.kunjungan.update({
+  const updated = await prisma.kunjungan.update({
     where: { id: kunjunganId },
-    data: { statusKunjungan: 'MENUNGGU_KASIR' },
+    data: { statusKunjungan: 'MENUNGGU_KASIR', waktuDischarge: new Date() },
   });
+
+  // Generate tagihan kasir secara otomatis
+  try {
+    await kasirService.generateTagihan(kunjunganId);
+  } catch (errTagihan) {
+    console.error(`[Kasir Error] Gagal generate tagihan:`, errTagihan.message);
+  }
+
+  // Kirim Bundle SATUSEHAT langsung untuk pasien Pulang
+  sendBundleForKunjungan(kunjunganId);
+
+  return updated;
 };
 
 module.exports = {
@@ -718,4 +825,5 @@ module.exports = {
   pulang,
   getRiwayatDokter,
   getRiwayatPasienByRM,
+  sendBundleForKunjungan,
 };

@@ -149,7 +149,7 @@ const satusehatWorker = new Worker(
       ...dataComplete,
       observations,
       resepDetails,
-      satusehat_encounter_id: dataComplete.satusehat_encounter_id || dataComplete.satusehatId || dataComplete.encounterId
+      encounterId: dataComplete.encounterId
     };
 
     // Buat Bundle Transaction Payload
