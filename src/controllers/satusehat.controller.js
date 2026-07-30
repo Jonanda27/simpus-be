@@ -258,6 +258,54 @@ const dispenseMedication = async (req, res, next) => {
 };
 
 /**
+ * Mengirim QuestionnaireResponse ke SATUSEHAT
+ */
+const createQuestionnaireResponse = async (req, res, next) => {
+  try {
+    const data = req.body;
+    
+    if (!data.pasienIhs || !data.encounterId || !data.items) {
+      return res.status(400).json({
+        success: false,
+        message: 'Data tidak lengkap untuk mengirim QuestionnaireResponse'
+      });
+    }
+
+    // Standardisasi field input untuk mapper
+    const mappedInput = {
+      patientIhs: data.pasienIhs,
+      encounterIhs: data.encounterId,
+      practitionerIhs: data.practitionerIhs,
+      patientName: data.patientName,
+      practitionerName: data.practitionerName,
+      questionnaireUrl: data.questionnaireUrl,
+      status: data.status,
+      items: data.items,
+      id: data.id
+    };
+
+    const result = await satusehatService.postQuestionnaireResponse(mappedInput);
+    
+    if (!result.success) {
+      return res.status(500).json(result);
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: 'Berhasil mengirim QuestionnaireResponse ke SATUSEHAT',
+      data: result
+    });
+  } catch (error) {
+    console.error('SATUSEHAT QuestionnaireResponse Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal mengirim QuestionnaireResponse',
+      error: error.message
+    });
+  }
+};
+
+/**
  * Get Encounter Detail directly from SATUSEHAT API
  */
 const getEncounterDetail = async (req, res, next) => {
@@ -297,7 +345,7 @@ const getMonitoringEncounters = async (req, res, next) => {
       where: {
         OR: [
           { encounterId: { not: null } },
-          { statusKunjungan: 'SELESAI' }
+          { statusKunjungan: { in: ['SEDANG_DIPERIKSA', 'MENUNGGU_FARMASI', 'MENUNGGU_KASIR', 'SELESAI'] } }
         ]
       },
       orderBy: { tanggalRegistrasi: 'desc' },
@@ -306,13 +354,46 @@ const getMonitoringEncounters = async (req, res, next) => {
         poliklinik: true,
         dokterTujuan: {
           select: { id: true, namaLengkap: true, username: true }
+        },
+        rekamMedis: true,
+        rujukanKeluar: true,
+        resep: {
+          include: { details: true }
         }
       }
     });
 
+    // Hitung ringkasan hit API FHIR untuk setiap Kunjungan/Encounter
+    const mappedKunjungans = kunjungans.map((k) => {
+      const apiHits = [];
+      if (k.encounterId) apiHits.push('Encounter');
+      if (k.rekamMedis) {
+        apiHits.push('Condition');
+        apiHits.push('Observation');
+        apiHits.push('ClinicalImpression');
+      }
+      if (k.rujukanKeluar?.satusehatId || k.rujukanKeluar) {
+        apiHits.push('ServiceRequest');
+      }
+      if (k.resep && k.resep.length > 0) {
+        apiHits.push('MedicationRequest');
+        apiHits.push('MedicationDispense');
+      }
+      if (k.statusKunjungan === 'SELESAI' || k.waktuDischarge) {
+        apiHits.push('Composition');
+      }
+
+      return {
+        ...k,
+        encounterStatus: k.statusKunjungan === 'SELESAI' ? 'finished' : (k.encounterId ? 'in-progress' : 'planned'),
+        fhirApiHitsCount: apiHits.length,
+        fhirApiHitList: apiHits
+      };
+    });
+
     return res.status(200).json({
       success: true,
-      data: kunjungans
+      data: mappedKunjungans
     });
   } catch (error) {
     console.error('SATUSEHAT Get Monitoring Encounters Error:', error);
@@ -382,10 +463,10 @@ const getResourceByEncounter = async (req, res, next) => {
 
     const SatuSehatGateway = require('../services/satusehat/gateway.service');
 
-    // Resource yang mencari berdasarkan Patient IHS (?subject= / ?patient=) bukan ?encounter=
-    const isSubjectBased = ['Goal', 'FamilyMemberHistory', 'MedicationStatement'].includes(resourceType);
+    // Resource yang mencari berdasarkan Patient IHS (?patient= / ?subject=) bukan ?encounter=
+    const isPatientSubjectBased = ['AllergyIntolerance', 'Goal', 'FamilyMemberHistory', 'MedicationStatement'].includes(resourceType);
 
-    if (isSubjectBased) {
+    if (isPatientSubjectBased) {
       const kunjungan = await prisma.kunjungan.findFirst({
         where: { encounterId },
         include: { pasien: { select: { noIHS: true } } }
@@ -496,6 +577,125 @@ const getResourceByEncounter = async (req, res, next) => {
   }
 };
 
+/**
+ * Mengirim ServiceRequest (Instruksi Rujukan / Lab / Radiologi) ke SATUSEHAT
+ */
+const createServiceRequest = async (req, res, next) => {
+  try {
+    const data = req.body;
+
+    if (!data.pasienIhs || !data.encounterId || !data.dokterIhs) {
+      return res.status(400).json({
+        success: false,
+        message: 'Data tidak lengkap untuk mengirim ServiceRequest. Field pasienIhs, encounterId, dan dokterIhs wajib diisi.'
+      });
+    }
+
+    // Standardisasi field input untuk mapper
+    const mappedInput = {
+      pasienIhs: data.pasienIhs,
+      pasienName: data.pasienName || "Patient",
+      encounterId: data.encounterId,
+      dokterIhs: data.dokterIhs,
+      dokterName: data.dokterName || "Practitioner",
+      requestType: data.requestType || "LAB", // "LAB" | "RAD" | "RUJUKAN"
+      requestCode: data.requestCode,
+      requestDisplay: data.requestDisplay,
+      tanggalOrder: data.tanggalOrder,
+      catatanKlinis: data.catatanKlinis || data.note,
+      orderId: data.orderId || data.id,
+      intent: data.intent,
+      priority: data.priority
+    };
+
+    const result = await satusehatService.postServiceRequest(mappedInput);
+
+    if (!result.success) {
+      return res.status(500).json(result);
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: 'Berhasil mengirim ServiceRequest ke SATUSEHAT',
+      data: result
+    });
+  } catch (error) {
+    console.error('SATUSEHAT ServiceRequest Controller Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal memproses pengiriman ServiceRequest',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Dynamically check and return available FHIR Resources for a given Encounter ID
+ */
+const getActiveResourcesByEncounter = async (req, res, next) => {
+  try {
+    const { encounterId } = req.params;
+    if (!encounterId) {
+      return res.status(400).json({ success: false, message: 'EncounterID wajib diisi' });
+    }
+
+    const SatuSehatGateway = require('../services/satusehat/gateway.service');
+    const prisma = require('../config/prisma');
+
+    // Selalu sertakan Encounter
+    const activeResources = [
+      { id: 'Encounter', label: 'Encounter' }
+    ];
+
+    // Daftar kandidat resource yang akan dipopulasikan jika data ditemukan
+    const candidates = [
+      { id: 'Condition', label: 'Condition (Diagnosa)' },
+      { id: 'Observation', label: 'Observation (TTV/Fisik)' },
+      { id: 'ClinicalImpression', label: 'ClinicalImpression' },
+      { id: 'ServiceRequest', label: 'ServiceRequest (Rujukan/Lab)' },
+      { id: 'Composition', label: 'Composition' },
+      { id: 'MedicationStatement', label: 'MedicationStatement' },
+      { id: 'MedicationRequest', label: 'MedicationRequest' },
+      { id: 'MedicationDispense', label: 'MedicationDispense' },
+      { id: 'QuestionnaireResponse', label: 'QuestionnaireResponse' }
+    ];
+
+    // Pengecekan paralel paralel cepat ke SATUSEHAT
+    await Promise.all(
+      candidates.map(async (c) => {
+        try {
+          let data;
+          if (['Goal', 'FamilyMemberHistory', 'MedicationStatement'].includes(c.id)) {
+            const kunjungan = await prisma.kunjungan.findFirst({
+              where: { encounterId },
+              include: { pasien: { select: { noIHS: true } } }
+            });
+            if (kunjungan?.pasien?.noIHS) {
+              data = await SatuSehatGateway.getResourceBySubject(c.id, kunjungan.pasien.noIHS);
+            }
+          } else {
+            data = await SatuSehatGateway.getResourceByEncounter(c.id, encounterId);
+          }
+
+          if (data && (data.total > 0 || (Array.isArray(data.entry) && data.entry.length > 0) || data.resourceType === c.id)) {
+            activeResources.push(c);
+          }
+        } catch (e) {
+          // Jika 404 / error, resource tersebut tidak aktif untuk encounter ini
+        }
+      })
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: activeResources
+    });
+  } catch (error) {
+    console.error('SATUSEHAT Get Active Resources Error:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 module.exports = {
   testAuth,
   syncPatientIHS,
@@ -503,8 +703,11 @@ module.exports = {
   syncPoliklinikLocation,
   searchKFA,
   dispenseMedication,
+  createQuestionnaireResponse,
   getEncounterDetail,
   getMonitoringEncounters,
   getResourceByEncounter,
-  retrySyncEncounter
+  getActiveResourcesByEncounter,
+  retrySyncEncounter,
+  createServiceRequest
 };

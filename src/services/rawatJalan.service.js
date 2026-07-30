@@ -360,6 +360,9 @@ const simpanSOAP = async (rekamMedisId, data) => {
       kesadaran: data.kesadaran ?? undefined,
       pemeriksaanFisik: data.pemeriksaanFisik ?? undefined,
       hasilPenunjang: data.hasilPenunjang ?? undefined,
+      odontogram: data.odontogram ?? undefined,
+      dmft: data.dmft ?? undefined,
+      oralFindings: data.oralFindings ?? undefined,
 
       // A - Asesmen
       diagnosisKlinis: data.diagnosisKlinis ?? undefined,
@@ -627,7 +630,8 @@ const sendBundleForKunjungan = async (kunjunganId) => {
             details: { include: { obat: true } }
           }
         },
-        dokterTujuan: { include: { tenagaMedis: true } }
+        dokterTujuan: { include: { tenagaMedis: true } },
+        rujukanKeluar: true
       }
     });
 
@@ -658,6 +662,28 @@ const sendBundleForKunjungan = async (kunjunganId) => {
     console.log(`[SATUSEHAT Bundle] 🚀 Mengirim Bundle untuk Kunjungan ID: ${kunjunganId}...`);
 
     const response = await SatuSehatGateway.sendBundleTransaction(bundlePayload);
+
+    // Ekstrak ServiceRequest ID dari Respon Bundle SATUSEHAT
+    if (response?.entry && Array.isArray(response.entry)) {
+      const srEntry = response.entry.find(e => 
+        e.response?.resourceType === 'ServiceRequest' || 
+        e.response?.location?.includes('ServiceRequest/')
+      );
+      if (srEntry) {
+        const srLocation = srEntry.response.location;
+        const srId = srEntry.response.resourceID || (srLocation ? srLocation.split('ServiceRequest/')[1]?.split('/')[0] : null);
+        if (srId) {
+          const rujukanRecord = await prisma.rujukanKeluar.findUnique({ where: { kunjunganId } });
+          if (rujukanRecord) {
+            await prisma.rujukanKeluar.update({
+              where: { id: rujukanRecord.id },
+              data: { satusehatId: srId }
+            });
+            console.log(`[SATUSEHAT Sync] ✅ ServiceRequest ID (${srId}) berhasil disimpan ke DB RujukanKeluar!`);
+          }
+        }
+      }
+    }
 
     await prisma.kunjungan.update({
       where: { id: kunjunganId },
@@ -748,17 +774,33 @@ const simpanResep = async (kunjunganId, user, resepArr) => {
  * Simpan Rujukan
  */
 const simpanRujukan = async (kunjunganId, dokterId, rujukanData) => {
-  const kunjungan = await prisma.kunjungan.findUnique({ where: { id: kunjunganId } });
+  const kunjungan = await prisma.kunjungan.findUnique({ 
+    where: { id: kunjunganId },
+    include: {
+      pasien: true,
+      dokterTujuan: {
+        include: { tenagaMedis: true }
+      }
+    }
+  });
   if (!kunjungan) throw new Error('Kunjungan tidak ditemukan');
 
   const rujukan = await prisma.$transaction(async (tx) => {
-    const res = await tx.rujukanKeluar.create({
-      data: {
+    const res = await tx.rujukanKeluar.upsert({
+      where: { kunjunganId },
+      update: {
+        faskesTujuan: rujukanData.faskesTujuan,
+        poliTujuan: rujukanData.poliTujuan,
+        dokterTujuan: rujukanData.dokterTujuan || null,
+        alasanRujukan: rujukanData.alasanRujukan,
+      },
+      create: {
         kunjunganId,
         pasienId: kunjungan.pasienId,
         dokterId,
         faskesTujuan: rujukanData.faskesTujuan,
         poliTujuan: rujukanData.poliTujuan,
+        dokterTujuan: rujukanData.dokterTujuan || null,
         alasanRujukan: rujukanData.alasanRujukan,
       },
     });
@@ -778,8 +820,8 @@ const simpanRujukan = async (kunjunganId, dokterId, rujukanData) => {
     console.error(`[Kasir Error] Gagal generate tagihan:`, errTagihan.message);
   }
 
-  // Kirim Bundle SATUSEHAT untuk kasus Rujukan
-  sendBundleForKunjungan(kunjunganId);
+  // Kirim Bundle Transaction SATUSEHAT (Termasuk Encounter, Observation, Condition, & ServiceRequest Rujukan)
+  await sendBundleForKunjungan(kunjunganId);
 
   return rujukan;
 };

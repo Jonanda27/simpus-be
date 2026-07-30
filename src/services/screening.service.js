@@ -62,6 +62,18 @@ const createScreening = async (data, petugasId) => {
       antropometri: {
         luasPermukaanTubuh: data.luasPermukaanTubuh ? parseFloat(data.luasPermukaanTubuh) : null,
       },
+      // Skrining Khusus Poli Gigi & Mulut
+      gigi: {
+        golonganDarah: data.golonganDarah || null,
+        rhesus: data.rhesus || null,
+        statusKehamilan: data.statusKehamilan || null,
+        debrisIndex: data.debrisIndex !== undefined ? parseFloat(data.debrisIndex) : null,
+        kalkulusIndex: data.kalkulusIndex !== undefined ? parseFloat(data.kalkulusIndex) : null,
+        skorOhis: data.skorOhis !== undefined ? parseFloat(data.skorOhis) : null,
+        interpretasiOhis: data.interpretasiOhis || null,
+        riwayatAlergiAnestesi: data.riwayatAlergiAnestesi || null,
+        riwayatPengencerDarah: data.riwayatPengencerDarah || null,
+      },
       // Catatan per-step
       catatan: {
         catatanPenyakitKeluarga: data.catatanPenyakitKeluarga || null,
@@ -73,6 +85,17 @@ const createScreening = async (data, petugasId) => {
         catatanKesehatanJiwa: data.catatanKesehatanJiwa || null,
       },
     };
+
+    // Update data Golongan Darah & Rhesus di Master Pasien jika diisi saat Skrining
+    if (data.golonganDarah || data.rhesus) {
+      await tx.pasien.update({
+        where: { id: data.pasienId },
+        data: {
+          ...(data.golonganDarah && { golonganDarah: data.golonganDarah }),
+          ...(data.rhesus && { rhesus: data.rhesus })
+        }
+      });
+    }
 
     // 1. Simpan data screening ke database
     const screening = await tx.screening.create({

@@ -174,8 +174,8 @@ class SatuSehatGateway {
             const token = await this.getAccessToken();
             const baseUrl = satusehatConfig?.SATUSEHAT_URL?.FHIR_URL || process.env.SATUSEHAT_BASE_URL;
 
-            // FamilyMemberHistory & MedicationStatement terkadang menggunakan ?patient= (Patient/{IHS})
-            const paramName = (resourceType === 'FamilyMemberHistory') ? 'patient' : 'subject';
+            // FamilyMemberHistory, AllergyIntolerance & MedicationStatement menggunakan ?patient= (Patient/{IHS})
+            const paramName = ['FamilyMemberHistory', 'AllergyIntolerance'].includes(resourceType) ? 'patient' : 'subject';
             const url = `${baseUrl}/${resourceType}?${paramName}=Patient/${patientIhs}`;
             
             const response = await axios.get(url, {

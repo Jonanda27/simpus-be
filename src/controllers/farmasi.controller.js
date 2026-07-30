@@ -13,7 +13,11 @@ exports.getAntrianFarmasi = async (req, res) => {
       },
       include: {
         pasien: true,
-        dokter: true,
+        dokter: {
+          include: {
+            tenagaMedis: true
+          }
+        },
         kunjungan: {
           include: {
             poliklinik: true,
@@ -51,7 +55,11 @@ exports.getResepById = async (req, res) => {
       where: { id },
       include: {
         pasien: true,
-        dokter: true,
+        dokter: {
+          include: {
+            tenagaMedis: true
+          }
+        },
         kunjungan: {
           include: {
             poliklinik: true,

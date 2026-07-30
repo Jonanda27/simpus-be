@@ -26,7 +26,19 @@ router.get('/encounters', satusehatController.getMonitoringEncounters);
 // API to GET Resource (Observation, Condition, ClinicalImpression, Goal) by Encounter ID
 router.get('/resource-by-encounter/:resourceType/:encounterId', satusehatController.getResourceByEncounter);
 
+// API to GET active list of resources that hit SATUSEHAT for an encounter
+router.get('/resource-list/:encounterId', satusehatController.getActiveResourcesByEncounter);
+
 // API to retry sync Bundle for a kunjungan
 router.post('/kunjungan/:kunjunganId/sync', satusehatController.retrySyncEncounter);
+
+// API to send MedicationDispense
+router.post('/dispense', satusehatController.dispenseMedication);
+
+// API to send QuestionnaireResponse
+router.post('/questionnaire-response', satusehatController.createQuestionnaireResponse);
+
+// API to send ServiceRequest (Rujukan / Lab / Radiologi)
+router.post('/service-request', satusehatController.createServiceRequest);
 
 module.exports = router;

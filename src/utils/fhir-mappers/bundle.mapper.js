@@ -205,6 +205,106 @@ const toRawatJalanBundle = (dataComplete = {}, orgId) => {
     });
   }
 
+  // Map Pemeriksaan Odontogram (Kemenkes OC000061) & Indeks DMF-T jika Poli Gigi
+  const odontogramData = dataComplete.rekamMedis?.odontogram || dataComplete.odontogram;
+  const dmftData = dataComplete.rekamMedis?.dmft || dataComplete.dmft;
+
+  if (odontogramData && typeof odontogramData === 'object' && Object.keys(odontogramData).length > 0) {
+    const odontUuid = `urn:uuid:${randomUUID()}`;
+    const odontResource = {
+      resourceType: "Observation",
+      status: "final",
+      category: [
+        {
+          coding: [
+            {
+              system: "http://terminology.hl7.org/CodeSystem/observation-category",
+              code: "exam",
+              display: "Exam"
+            }
+          ]
+        }
+      ],
+      code: {
+        coding: [
+          {
+            system: "http://terminology.kemkes.go.id/CodeSystem/clinical-term",
+            code: "OC000061",
+            display: "Pemeriksaan Odontogram"
+          }
+        ]
+      },
+      ...(pasienIhs && { subject: { reference: formatRef('Patient', pasienIhs), display: pasienName } }),
+      encounter: { reference: encounterRef },
+      effectiveDateTime: new Date().toISOString(),
+      valueBoolean: true,
+      ...(dokterIhs && { performer: [{ reference: formatRef('Practitioner', dokterIhs), display: dokterName }] })
+    };
+
+    entries.push({
+      fullUrl: odontUuid,
+      resource: odontResource,
+      request: {
+        method: "POST",
+        url: "Observation"
+      }
+    });
+    obsUuids.push(odontUuid);
+  }
+
+  if (dmftData && typeof dmftData === 'object') {
+    const dmftMetrics = [
+      { key: 'd', code: "251319000", display: "Decayed tooth count", val: dmftData.d },
+      { key: 'm', code: "251317003", display: "Missing tooth count", val: dmftData.m },
+      { key: 'f', code: "251318008", display: "Filled tooth count", val: dmftData.f },
+    ];
+
+    dmftMetrics.forEach((m) => {
+      if (m.val !== undefined && m.val !== null) {
+        const metricUuid = `urn:uuid:${randomUUID()}`;
+        const metricResource = {
+          resourceType: "Observation",
+          status: "final",
+          category: [
+            {
+              coding: [
+                {
+                  system: "http://terminology.hl7.org/CodeSystem/observation-category",
+                  code: "exam",
+                  display: "Exam"
+                }
+              ]
+            }
+          ],
+          code: {
+            coding: [
+              {
+                system: "http://snomed.info/sct",
+                code: m.code,
+                display: m.display
+              }
+            ]
+          },
+          ...(pasienIhs && { subject: { reference: formatRef('Patient', pasienIhs), display: pasienName } }),
+          encounter: { reference: encounterRef },
+          effectiveDateTime: new Date().toISOString(),
+          valueString: String(m.val),
+          ...(dokterIhs && { performer: [{ reference: formatRef('Practitioner', dokterIhs), display: dokterName }] })
+        };
+
+        entries.push({
+          fullUrl: metricUuid,
+          resource: metricResource,
+          request: {
+            method: "POST",
+            url: "Observation"
+          }
+        });
+        obsUuids.push(metricUuid);
+      }
+    });
+  }
+
   // Map Luas Permukaan Tubuh (BSA - LOINC 8277-6) jika ada
   const bsaVal = dataComplete.screening?.dataTambahan?.antropometri?.luasPermukaanTubuh || dataComplete.luasPermukaanTubuh;
   if (bsaVal && !isNaN(bsaVal)) {
@@ -856,6 +956,60 @@ const toRawatJalanBundle = (dataComplete = {}, orgId) => {
     });
   }
 
+  // 13. SERVICE REQUEST (RUJUKAN KELUAR)
+  let serviceRequestUuid = null;
+  if (dataComplete.rujukanKeluar) {
+    serviceRequestUuid = `urn:uuid:${randomUUID()}`;
+    const rujukanData = dataComplete.rujukanKeluar;
+    const srResource = {
+      resourceType: "ServiceRequest",
+      identifier: [
+        {
+          system: `http://sys-ids.kemkes.go.id/servicerequest/${organizationId}`,
+          value: rujukanData.id || `SR-${Date.now()}`
+        }
+      ],
+      status: "active",
+      intent: "original-order",
+      priority: "routine",
+      category: [
+        {
+          coding: [
+            {
+              system: "http://snomed.info/sct",
+              code: "3457005",
+              display: "Referral"
+            }
+          ]
+        }
+      ],
+      code: {
+        coding: [
+          {
+            system: "http://snomed.info/sct",
+            code: "3457005",
+            display: `Referral to ${rujukanData.poliTujuan} at ${rujukanData.faskesTujuan}`
+          }
+        ]
+      },
+      ...(pasienIhs && { subject: { reference: formatRef('Patient', pasienIhs), display: pasienName } }),
+      encounter: { reference: encounterRef },
+      authoredOn: new Date().toISOString(),
+      ...(dokterIhs && { requester: { reference: formatRef('Practitioner', dokterIhs), display: dokterName } }),
+      ...(dokterIhs && { performer: [{ reference: formatRef('Practitioner', dokterIhs), display: dokterName }] }),
+      ...(rujukanData.alasanRujukan && { note: [{ text: rujukanData.alasanRujukan }] })
+    };
+
+    entries.push({
+      fullUrl: serviceRequestUuid,
+      resource: srResource,
+      request: {
+        method: "POST",
+        url: "ServiceRequest"
+      }
+    });
+  }
+
   if (medReqUuids.length > 0) {
     compositionSections.push({
       title: "Resep Obat",
@@ -872,6 +1026,11 @@ const toRawatJalanBundle = (dataComplete = {}, orgId) => {
     });
   }
 
+  const instructionEntries = [];
+  if (serviceRequestUuid) {
+    instructionEntries.push({ reference: serviceRequestUuid });
+  }
+
   compositionSections.push({
     title: "Instruksi Tindak Lanjut",
     code: {
@@ -883,9 +1042,10 @@ const toRawatJalanBundle = (dataComplete = {}, orgId) => {
         }
       ]
     },
+    ...(instructionEntries.length > 0 && { entry: instructionEntries }),
     text: {
       status: "generated",
-      div: `<div xmlns="http://www.w3.org/1999/xhtml">${dataComplete.rekamMedis?.instruksiMedis || dataComplete.rekamMedis?.rencanaTerapi || "Kontrol sesuai petunjuk dokter"}</div>`
+      div: `<div xmlns="http://www.w3.org/1999/xhtml">${dataComplete.rekamMedis?.instruksiMedis || dataComplete.rekamMedis?.rencanaTerapi || "Rujukan ke " + (dataComplete.rujukanKeluar?.faskesTujuan || "Faskes Tujuan")}</div>`
     }
   });
 

@@ -374,6 +374,9 @@ model RekamMedis {
   kesadaran               String?
   pemeriksaanFisik        String?   @db.Text
   hasilPenunjang          String?   @db.Text
+  odontogram              Json?     // Interactive Odontogram FDI Map
+  dmft                    Json?     // Indeks DMF-T (D, M, F, Total)
+  oralFindings            Json?     // Occlusi, Torus, Palatum, Diastema, Anomali
 
   // A - Asesmen
   diagnosisKlinis         String?   @db.Text
@@ -648,8 +651,12 @@ model RujukanKeluar {
   
   faskesTujuan    String
   poliTujuan      String
+  dokterTujuan    String?     // Dokter Spesialis Tujuan (Teman Sejawat)
   alasanRujukan   String      @db.Text
   tanggalRujukan  DateTime    @default(now())
+
+  // Bridging SATUSEHAT FHIR
+  satusehatId     String?     @unique // ID ServiceRequest di SATUSEHAT
 }
 
 // ==========================================
