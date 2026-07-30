@@ -57,4 +57,59 @@ const buildObservationPayload = (data) => {
   return payload;
 };
 
-module.exports = { buildObservationPayload };
+const toFHIRRadiologyObservation = (data) => {
+  const effectiveDate = data.createdAt
+    ? new Date(data.createdAt).toISOString()
+    : new Date().toISOString();
+
+  return {
+    resourceType: "Observation",
+    status: "final",
+    category: [
+      {
+        coding: [
+          {
+            system: "http://terminology.hl7.org/CodeSystem/observation-category",
+            code: "imaging",
+            display: "Imaging"
+          }
+        ]
+      }
+    ],
+    code: {
+      coding: [
+        {
+          system: "http://loinc.org",
+          code: data.kodeLoinc || "39051-8",
+          display: data.namaPemeriksaan || "Diagnostic radiography"
+        }
+      ]
+    },
+    subject: {
+      reference: `Patient/${data.pasienIhs}`,
+      display: data.pasienName
+    },
+    encounter: {
+      reference: data.encounterId?.startsWith('urn:uuid:') ? data.encounterId : `Encounter/${data.encounterId}`
+    },
+    effectiveDateTime: effectiveDate,
+    valueString: data.bacaanNaratif || data.hasil || "Hasil pemeriksaan radiologi dalam batas normal.",
+    ...(data.dokterIhs && {
+      performer: [
+        {
+          reference: `Practitioner/${(data.dokterIhs && !data.dokterIhs.startsWith('cms')) ? data.dokterIhs : (process.env.SATUSEHAT_PRACTITIONER_IHS || 'N1000001')}`,
+          display: data.dokterName || "Dokter Spesialis Radiologi"
+        }
+      ]
+    }),
+    ...(data.imagingStudyId && {
+      derivedFrom: [
+        {
+          reference: data.imagingStudyId.startsWith('urn:uuid:') ? data.imagingStudyId : `ImagingStudy/${data.imagingStudyId}`
+        }
+      ]
+    })
+  };
+};
+
+module.exports = { buildObservationPayload, toFHIRRadiologyObservation };

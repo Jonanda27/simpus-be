@@ -3,30 +3,19 @@ const router = express.Router();
 const radiologiController = require('../controllers/radiologi.controller');
 const { protect } = require('../middlewares/auth.middleware');
 
-// Menerapkan middleware autentikasi untuk semua endpoint di bawah ini
+// Menerapkan middleware autentikasi untuk semua endpoint radiologi
 router.use(protect);
 
-// ==========================================
-// ALUR INTERNAL SIMPUS (LOKAL)
-// ==========================================
-
-// 1. Dokter Poli membuat Order Radiologi
+// 1. POST /api/radiologi/order (Membuat Order Radiologi)
 router.post('/order', radiologiController.createOrder);
 
-// 2. Petugas Radiologi melihat antrian kunjungan
-router.get('/antrian', radiologiController.getAntrian);
+// 2. GET /api/radiologi/order (Mendapatkan Daftar Order Radiologi)
+router.get('/order', radiologiController.getOrders);
 
-// 3. Petugas Radiologi memproses pemeriksaan (memasukkan alat/modality)
-router.post('/:orderId/proses', radiologiController.prosesPemeriksaan);
+// 3. GET /api/radiologi/order/:id (Detail Order Radiologi)
+router.get('/order/:id', radiologiController.getOrderById);
 
-// 4. Dokter Radiologi mengisi hasil bacaan / ekspertise
-router.put('/:pemeriksaanId/ekspertise', radiologiController.simpanEkspertise);
-
-// ==========================================
-// ALUR INTEGRASI PIHAK KETIGA (SATUSEHAT)
-// ==========================================
-
-// 5. Trigger manual / background job untuk mengirim ImagingStudy ke SATUSEHAT
-router.post('/:pemeriksaanId/sync-satusehat', radiologiController.syncKeSatuSehat);
+// 4. POST /api/radiologi/order/:id/hasil (Input Hasil & Ekspertise Radiologi)
+router.post('/order/:id/hasil', radiologiController.submitHasil);
 
 module.exports = router;

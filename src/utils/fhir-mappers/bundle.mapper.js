@@ -10,6 +10,9 @@ const { buildFamilyMemberHistoryPayload } = require('./family-member-history.map
 const { buildMedicationStatementPayload } = require('./medication-statement.mapper');
 const { buildClinicalImpressionPayload } = require('./clinical-impression.mapper');
 const { buildGoalPayload } = require('./goal.mapper');
+const { buildServiceRequestPayload } = require('./service-request.mapper');
+const { toFHIRImagingStudy } = require('./imaging-study.mapper');
+const { toFHIRRadiologyObservation } = require('./observation.mapper');
 
 /**
  * Helper to ensure standard reference string
@@ -45,7 +48,8 @@ const toRawatJalanBundle = (dataComplete = {}, orgId) => {
   // Ekstrak referensi IHS dari nested objects terlebih dahulu
   const pasienIhs = dataComplete.pasienIhs || dataComplete.pasien?.noIHS;
   const pasienName = dataComplete.pasienName || dataComplete.pasien?.namaLengkap;
-  const dokterIhs = dataComplete.dokterIhs || dataComplete.dokter?.noIHS || dataComplete.dokter?.tenagaMedis?.noIHS || dataComplete.dokterTujuan?.tenagaMedis?.noIHS;
+  const rawDokterIhs = dataComplete.dokterIhs || dataComplete.dokter?.noIHS || dataComplete.dokter?.tenagaMedis?.noIHS || dataComplete.dokterTujuan?.tenagaMedis?.noIHS;
+  const dokterIhs = (rawDokterIhs && !rawDokterIhs.startsWith('cms')) ? rawDokterIhs : (process.env.SATUSEHAT_PRACTITIONER_IHS || 'N1000001');
   const dokterName = dataComplete.dokterName || dataComplete.dokter?.namaLengkap || dataComplete.dokterTujuan?.namaLengkap;
   const poliIhs = dataComplete.poliIhs || dataComplete.poliklinik?.ihsLocationId || dataComplete.poliklinik?.satusehatId;
   const poliName = dataComplete.poliName || dataComplete.poliklinik?.namaPoli;
@@ -789,6 +793,134 @@ const toRawatJalanBundle = (dataComplete = {}, orgId) => {
     medReqUuids.push(medReqUuid);
   });
 
+  // 5.b RADIOLOGI FHIR RESOURCES (ServiceRequest, ImagingStudy, Observation, DiagnosticReport)
+  const orderRadiologi = dataComplete.orderRadiologi || dataComplete.rekamMedis?.orderRadiologi;
+  let radDiagnosticReportUuid = null;
+
+  if (orderRadiologi && (orderRadiologi.status === 'COMPLETED' || orderRadiologi.hasil)) {
+    const radServiceReqUuid = `urn:uuid:${randomUUID()}`;
+    const radImagingStudyUuid = `urn:uuid:${randomUUID()}`;
+    const radObsUuid = `urn:uuid:${randomUUID()}`;
+    radDiagnosticReportUuid = `urn:uuid:${randomUUID()}`;
+
+    const radDetail = orderRadiologi.details?.[0] || {};
+    const radHasil = orderRadiologi.hasil || {};
+
+    // 1. ServiceRequest (Radiologi ACSN)
+    const radSrPayload = buildServiceRequestPayload({
+      id: orderRadiologi.id,
+      orderId: orderRadiologi.id,
+      acsn: orderRadiologi.acsn,
+      requestCode: radDetail.kodeLoinc || "39051-8",
+      requestDisplay: radDetail.namaPemeriksaan || "Diagnostic radiography",
+      catatanKlinis: orderRadiologi.catatanKlinis,
+      pasienIhs,
+      pasienName,
+      dokterIhs,
+      dokterName,
+      encounterId: encounterRef.startsWith('urn:uuid:') ? encounterRef : (satusehatEncounterId || encounterUuid),
+      tanggalOrder: orderRadiologi.createdAt
+    }, organizationId, "RAD");
+
+    radSrPayload.encounter = { reference: encounterRef };
+    if (pasienIhs) radSrPayload.subject = { reference: formatRef('Patient', pasienIhs), display: pasienName };
+    if (dokterIhs) radSrPayload.requester = { reference: formatRef('Practitioner', dokterIhs), display: dokterName };
+
+    entries.push({
+      fullUrl: radServiceReqUuid,
+      resource: radSrPayload,
+      request: { method: "POST", url: "ServiceRequest" }
+    });
+
+    // 2. ImagingStudy (WADO NIDR)
+    const radImagingPayload = toFHIRImagingStudy({
+      hasil: radHasil,
+      order: orderRadiologi,
+      patientIhs: pasienIhs,
+      encounterSatusehatId: encounterRef.startsWith('urn:uuid:') ? encounterRef : (satusehatEncounterId || encounterUuid),
+      organizationId
+    });
+
+    radImagingPayload.encounter = { reference: encounterRef };
+    if (pasienIhs) radImagingPayload.subject = { reference: formatRef('Patient', pasienIhs), display: pasienName };
+
+    entries.push({
+      fullUrl: radImagingStudyUuid,
+      resource: radImagingPayload,
+      request: { method: "POST", url: "ImagingStudy" }
+    });
+
+    // 3. Observation (Imaging Category)
+    const radDokterIhsRaw = radHasil.dokterRadiologiId || dokterIhs;
+    const radDokterIhsSanitized = (radDokterIhsRaw && !radDokterIhsRaw.startsWith('cms')) ? radDokterIhsRaw : (process.env.SATUSEHAT_PRACTITIONER_IHS || 'N1000001');
+
+    const radObsPayload = toFHIRRadiologyObservation({
+      kodeLoinc: radDetail.kodeLoinc || "39051-8",
+      namaPemeriksaan: radDetail.namaPemeriksaan || "Diagnostic radiography",
+      bacaanNaratif: radHasil.bacaanNaratif || radHasil.interpretasi || "Hasil foto rontgen terlampir",
+      pasienIhs,
+      pasienName,
+      dokterIhs: radDokterIhsSanitized,
+      dokterName,
+      encounterId: encounterRef.startsWith('urn:uuid:') ? encounterRef : (satusehatEncounterId || encounterUuid),
+      imagingStudyId: radImagingStudyUuid,
+      createdAt: radHasil.createdAt
+    });
+
+    radObsPayload.encounter = { reference: encounterRef };
+    if (pasienIhs) radObsPayload.subject = { reference: formatRef('Patient', pasienIhs), display: pasienName };
+
+    entries.push({
+      fullUrl: radObsUuid,
+      resource: radObsPayload,
+      request: { method: "POST", url: "Observation" }
+    });
+
+    // 4. DiagnosticReport (Radiology Expertise Envelope)
+    const validDokterIhs = (dokterIhs && !dokterIhs.startsWith('cms')) ? dokterIhs : (process.env.SATUSEHAT_PRACTITIONER_IHS || 'N1000001');
+    const performerRef = `Practitioner/${validDokterIhs}`;
+    
+    const radDiagReportPayload = {
+      resourceType: "DiagnosticReport",
+      status: "final",
+      category: [
+        {
+          coding: [
+            {
+              system: "http://terminology.hl7.org/CodeSystem/v2-0074",
+              code: "RAD",
+              display: "Radiology"
+            }
+          ]
+        }
+      ],
+      code: {
+        coding: [
+          {
+            system: "http://loinc.org",
+            code: radDetail.kodeLoinc || "39051-8",
+            display: radDetail.namaPemeriksaan || "Diagnostic radiography"
+          }
+        ]
+      },
+      subject: { reference: formatRef('Patient', pasienIhs), display: pasienName },
+      encounter: { reference: encounterRef },
+      effectiveDateTime: radHasil.createdAt ? new Date(radHasil.createdAt).toISOString() : new Date().toISOString(),
+      issued: new Date().toISOString(),
+      performer: [{ reference: performerRef, display: dokterName || "Dokter Spesialis Radiologi" }],
+      basedOn: [{ reference: radServiceReqUuid }],
+      result: [{ reference: radObsUuid }],
+      imagingStudy: [{ reference: radImagingStudyUuid }],
+      conclusion: radHasil.kesimpulan || "Ekspertise Radiologi Selesai"
+    };
+
+    entries.push({
+      fullUrl: radDiagnosticReportUuid,
+      resource: radDiagReportPayload,
+      request: { method: "POST", url: "DiagnosticReport" }
+    });
+  }
+
   // 6. COMPOSITION (Resume Medis)
   const compositionUuid = `urn:uuid:${randomUUID()}`;
   const compositionPayload = buildCompositionPayload({
@@ -802,7 +934,8 @@ const toRawatJalanBundle = (dataComplete = {}, orgId) => {
     dokterName,
     title: "Resume Medis Rawat Jalan",
     ringkasanKlinis: dataComplete.rekamMedis?.keluhanUtama || dataComplete.rekamMedis?.diagnosisKlinis || "Pemeriksaan Rawat Jalan",
-    instruksiTindakLanjut: dataComplete.rekamMedis?.instruksiMedis || dataComplete.rekamMedis?.rencanaTerapi || "Kontrol bila keluhan berlanjut"
+    instruksiTindakLanjut: dataComplete.rekamMedis?.instruksiMedis || dataComplete.rekamMedis?.rencanaTerapi || "Kontrol bila keluhan berlanjut",
+    diagnosticReportId: radDiagnosticReportUuid
   }, organizationId);
 
   compositionPayload.encounter = { reference: encounterRef };

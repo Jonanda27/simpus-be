@@ -35,6 +35,7 @@ model User {
   // Relasi Radiologi Baru
   orderRadiologi   OrderRadiologi[]       @relation("DokterOrderRadiologi")
   bacaRadiologi    PemeriksaanRadiologi[] @relation("DokterBacaRadiologi")
+  hasilRadiologi   HasilRadiologi[]       @relation("DokterHasilRadiologi")
   
   penginputRekamMedis RekamMedis[] @relation("PenginputRekamMedis")
   penginputDiagnosis DiagnosisPasien[] @relation("PenginputDiagnosis")
@@ -730,7 +731,8 @@ model OrderRadiologi {
   intent          String      @default("original-order")
   priority        String      @default("routine")
   categoryCode    String?     @default("363679005")      // Kode SNOMED CT (363679005 = Imaging)
-  requestCode     String?                                 // Kode DICOM / SNOMED
+  requestCode     String?                                 // Kode DICOM / SNOMED / LOINC
+  acsn            String?     @unique                     // Accession Number unik lokal (misal: ACSN-20260730-001)
 
   kunjunganId     String      @unique
   kunjungan       Kunjungan   @relation(fields: [kunjunganId], references: [id], onDelete: Cascade)
@@ -741,14 +743,53 @@ model OrderRadiologi {
   dokterId        String
   dokter          User        @relation("DokterOrderRadiologi", fields: [dokterId], references: [id])
   
-  status          String      @default("MENUNGGU_RADIOLOGI") // MENUNGGU_RADIOLOGI, DIPROSES, SELESAI, DIBATALKAN
+  status          String      @default("MENUNGGU_RADIOLOGI") // MENUNGGU_RADIOLOGI, REQUESTED, IN_PROGRESS, COMPLETED, CANCELLED
   catatanKlinis   String?     @db.Text
+  prioritas       String      @default("routine")            // routine / stat
   tanggalOrder    DateTime    @default(now())
   
   satusehatSync   Json?
 
+  details         DetailOrderRadiologi[]
+  hasil           HasilRadiologi?
   pemeriksaan     PemeriksaanRadiologi[]
   laporanDiagnostik LaporanDiagnostik?
+
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+}
+
+model DetailOrderRadiologi {
+  id              String         @id @default(cuid())
+  orderRadiologiId String
+  orderRadiologi  OrderRadiologi @relation(fields: [orderRadiologiId], references: [id], onDelete: Cascade)
+
+  kodeLoinc       String         // Kode LOINC (misal: 39051-8)
+  namaPemeriksaan String         // Display LOINC (misal: XR Thorax AP)
+  bodySiteCode    String?        // Kode SNOMED CT lokasi anatomis
+  bodySiteDisplay String?        // Display SNOMED CT lokasi anatomis
+
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+}
+
+model HasilRadiologi {
+  id                  String         @id @default(cuid())
+  orderRadiologiId    String         @unique
+  orderRadiologi      OrderRadiologi @relation(fields: [orderRadiologiId], references: [id], onDelete: Cascade)
+
+  dokterRadiologiId   String?
+  dokterRadiologi     User?          @relation("DokterHasilRadiologi", fields: [dokterRadiologiId], references: [id])
+
+  wadoUrl             String?        @db.Text // URL WADO dari NIDR / PACS
+  imagingStudyId      String?        // ID ImagingStudy SATUSEHAT
+  bacaanNaratif       String?        @db.Text // Observation (Hasil Ekspertise)
+  kesimpulan          String?        @db.Text // DiagnosticReport (Kesan)
+  observationId       String?        // ID Observation SATUSEHAT
+  diagnosticReportId  String?        // ID DiagnosticReport SATUSEHAT
+
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
 }
 
 // Wadah Utama ImagingStudy (One-to-Many terhadap Order & Kunjungan)

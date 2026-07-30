@@ -11,9 +11,9 @@ const buildServiceRequestPayload = (data, orgId, type = "LAB") => {
   if (type === "RAD") {
     categoryCode = "363679005";
     categoryDisplay = "Imaging";
-    codeSystem = "http://snomed.info/sct";
-    requestCode = data.requestCode || "363679005";
-    requestDisplay = data.requestDisplay || "Pemeriksaan Radiologi";
+    codeSystem = "http://loinc.org";
+    requestCode = data.requestCode || "39051-8";
+    requestDisplay = data.requestDisplay || "Diagnostic radiography";
   } else if (type === "RUJUKAN") {
     categoryCode = "3457005";
     categoryDisplay = "Referral";
@@ -26,14 +26,31 @@ const buildServiceRequestPayload = (data, orgId, type = "LAB") => {
     ? new Date(data.tanggalOrder).toISOString() 
     : new Date().toISOString();
 
+  const identifiers = [
+    {
+      system: `http://sys-ids.kemkes.go.id/servicerequest/${orgId}`,
+      value: data.orderId || data.id || `SR-${Date.now()}`
+    }
+  ];
+
+  if (type === "RAD" || data.acsn) {
+    identifiers.push({
+      type: {
+        coding: [
+          {
+            system: "http://terminology.hl7.org/CodeSystem/v2-0203",
+            code: "ACSN"
+          }
+        ]
+      },
+      system: `http://sys-ids.kemkes.go.id/acsn/${orgId}`,
+      value: data.acsn || `ACSN-${data.id || Date.now()}`
+    });
+  }
+
   return {
     resourceType: "ServiceRequest",
-    identifier: [
-      {
-        system: `http://sys-ids.kemkes.go.id/servicerequest/${orgId}`,
-        value: data.orderId || data.id || `SR-${Date.now()}`
-      }
-    ],
+    identifier: identifiers,
     status: "active",
     intent: data.intent || "original-order",
     priority: data.priority || "routine",
@@ -62,7 +79,7 @@ const buildServiceRequestPayload = (data, orgId, type = "LAB") => {
       display: data.pasienName
     },
     encounter: {
-      reference: `Encounter/${data.encounterId}`
+      reference: data.encounterId?.startsWith('urn:uuid:') ? data.encounterId : `Encounter/${data.encounterId}`
     },
     authoredOn: dateStr,
     requester: {

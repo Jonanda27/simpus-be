@@ -18,6 +18,7 @@ async function main() {
     { username: 'laboratorium', role: 'LABORATORIUM', namaLengkap: 'Siti Analis, Amd.AK' },
     { username: 'kasir', role: 'KASIR', namaLengkap: 'Petugas Kasir Utama' },
     { username: 'petugas_ukm', role: 'PETUGAS_UKM', namaLengkap: 'Perawat Program UKM' },
+    { username: 'radiologi', role: 'RADIOLOGI', namaLengkap: 'dr. Endang Sp.Rad / Petugas Radiografi' },
   ];
 
   for (const user of users) {
@@ -330,10 +331,12 @@ async function main() {
   const poliUmum = await prisma.poliklinik.findUnique({ where: { kodePoli: 'UMUM' } });
 
   // A. Kunjungan / Encounter FHIR
+  await prisma.kunjungan.deleteMany({ where: { encounterId: 'Enc-FHIR-889001' } });
+
   const kunjungan = await prisma.kunjungan.create({
     data: {
       pasienId: pasienRahmat.id,
-      satusehatId: 'Enc-FHIR-889001',
+      encounterId: 'Enc-FHIR-889001',
       tanggalRegistrasi: new Date(),
       jamRegistrasi: '08:30',
       poliklinikId: poliUmum.id,
@@ -481,6 +484,10 @@ async function main() {
       satusehatSync: { status: 'SYNCED', timestamp: new Date() },
     },
   });
+
+  // I. Seed Master Data LOINC Radiologi
+  const { seedRadiologiLoinc } = require('./seeders/seed-radiologi-loinc');
+  await seedRadiologiLoinc(prisma);
 
   console.log('✅ Simulasi Alur Transaksi Klinis & HL7 FHIR SATUSEHAT berhasil di-seed!');
   console.log('🎉 SEEDING SANGAT LENGKAP & DETIL SELESAI!');

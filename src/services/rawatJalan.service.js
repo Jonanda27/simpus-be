@@ -126,7 +126,7 @@ const getAntrianDokter = async (user) => {
   const whereClause = {
     tanggalRegistrasi: { gte: today, lt: tomorrow },
     statusKunjungan: {
-      in: ['MENUNGGU_DOKTER', 'DIPERIKSA', 'MENUNGGU_LAB'],
+      in: ['MENUNGGU_DOKTER', 'DIPERIKSA', 'MENUNGGU_LAB', 'MENUNGGU_RADIOLOGI'],
     },
   };
 
@@ -631,7 +631,14 @@ const sendBundleForKunjungan = async (kunjunganId) => {
           }
         },
         dokterTujuan: { include: { tenagaMedis: true } },
-        rujukanKeluar: true
+        rujukanKeluar: true,
+        orderRadiologi: {
+          include: {
+            details: true,
+            hasil: true,
+            dokter: { include: { tenagaMedis: true } }
+          }
+        }
       }
     });
 

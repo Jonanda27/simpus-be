@@ -1,6 +1,6 @@
 const { buildLocationPayload } = require('./location.mapper');
 const { buildEncounterPayload } = require('./encounter.mapper');
-const { buildObservationPayload } = require('./observation.mapper');
+const { buildObservationPayload, toFHIRRadiologyObservation } = require('./observation.mapper');
 const { buildConditionPayload } = require('./condition.mapper');
 const { buildMedicationPayload, buildMedicationRequestPayload } = require('./medication.mapper');
 const { buildProcedurePayload } = require('./procedure.mapper');
@@ -13,12 +13,14 @@ const { buildServiceRequestPayload } = require('./service-request.mapper');
 const { buildSpecimenPayload } = require('./specimen.mapper');
 const { buildRelatedPersonPayload } = require('./related-person.mapper');
 const { buildQuestionnaireResponsePayload } = require('./questionnaire-response.mapper');
+const { toFHIRImagingStudy } = require('./imaging-study.mapper');
 const { toRawatJalanBundle } = require('./bundle.mapper');
 
 module.exports = {
   buildLocationPayload,
   buildEncounterPayload,
   buildObservationPayload,
+  toFHIRRadiologyObservation,
   buildConditionPayload,
   buildMedicationPayload,
   buildMedicationRequestPayload,
@@ -32,5 +34,6 @@ module.exports = {
   buildSpecimenPayload,
   buildRelatedPersonPayload,
   buildQuestionnaireResponsePayload,
+  toFHIRImagingStudy,
   toRawatJalanBundle
 };

@@ -85,7 +85,24 @@ const buildCompositionPayload = (data, orgId) => {
           status: "generated",
           div: `<div xmlns="http://www.w3.org/1999/xhtml">${data.instruksiTindakLanjut || "Kontrol sesuai petunjuk dokter"}</div>`
         }
-      }
+      },
+      ...(data.diagnosticReportId ? [{
+        title: "Hasil Pemeriksaan Radiologi",
+        code: {
+          coding: [
+            {
+              system: "http://loinc.org",
+              code: "18782-3",
+              display: "Radiology Study observation (narrative)"
+            }
+          ]
+        },
+        entry: [
+          {
+            reference: `DiagnosticReport/${data.diagnosticReportId}`
+          }
+        ]
+      }] : [])
     ]
   };
 };
