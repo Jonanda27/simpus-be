@@ -36,9 +36,13 @@ const klinikService = {
       select: {
         id: true,
         username: true,
+        namaLengkap: true,
         role: true,
       },
-      orderBy: { username: 'asc' },
+      orderBy: [
+        { namaLengkap: 'asc' },
+        { username: 'asc' }
+      ],
     });
   },
 

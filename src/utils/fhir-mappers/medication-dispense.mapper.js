@@ -71,10 +71,7 @@ const buildMedicationDispensePayload = (data, medicationId, orgId) => {
     },
     authorizingPrescription: [
       {
-        identifier: {
-          system: `http://sys-ids.kemkes.go.id/prescription-item/${orgId}`,
-          value: data.resepDetailId
-        }
+        reference: `MedicationRequest/${data.medicationRequestId}`
       }
     ],
     quantity: {

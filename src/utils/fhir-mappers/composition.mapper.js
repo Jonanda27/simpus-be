@@ -41,12 +41,14 @@ const buildCompositionPayload = (data, orgId) => {
       reference: `Encounter/${data.encounterId}`
     },
     date: dateStr,
-    author: [
-      {
-        reference: `Practitioner/${data.dokterIhs}`,
-        display: data.dokterName
-      }
-    ],
+    ...(data.dokterIhs && data.dokterIhs !== 'undefined' && {
+      author: [
+        {
+          reference: `Practitioner/${data.dokterIhs}`,
+          ...(data.dokterName && { display: data.dokterName })
+        }
+      ]
+    }),
     title: data.title || "Resume Medis Pasien",
     custodian: {
       reference: `Organization/${orgId}`
@@ -83,7 +85,24 @@ const buildCompositionPayload = (data, orgId) => {
           status: "generated",
           div: `<div xmlns="http://www.w3.org/1999/xhtml">${data.instruksiTindakLanjut || "Kontrol sesuai petunjuk dokter"}</div>`
         }
-      }
+      },
+      ...(data.diagnosticReportId ? [{
+        title: "Hasil Pemeriksaan Radiologi",
+        code: {
+          coding: [
+            {
+              system: "http://loinc.org",
+              code: "18782-3",
+              display: "Radiology Study observation (narrative)"
+            }
+          ]
+        },
+        entry: [
+          {
+            reference: `DiagnosticReport/${data.diagnosticReportId}`
+          }
+        ]
+      }] : [])
     ]
   };
 };

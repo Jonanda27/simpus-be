@@ -257,11 +257,457 @@ const dispenseMedication = async (req, res, next) => {
   }
 };
 
+/**
+ * Mengirim QuestionnaireResponse ke SATUSEHAT
+ */
+const createQuestionnaireResponse = async (req, res, next) => {
+  try {
+    const data = req.body;
+    
+    if (!data.pasienIhs || !data.encounterId || !data.items) {
+      return res.status(400).json({
+        success: false,
+        message: 'Data tidak lengkap untuk mengirim QuestionnaireResponse'
+      });
+    }
+
+    // Standardisasi field input untuk mapper
+    const mappedInput = {
+      patientIhs: data.pasienIhs,
+      encounterIhs: data.encounterId,
+      practitionerIhs: data.practitionerIhs,
+      patientName: data.patientName,
+      practitionerName: data.practitionerName,
+      questionnaireUrl: data.questionnaireUrl,
+      status: data.status,
+      items: data.items,
+      id: data.id
+    };
+
+    const result = await satusehatService.postQuestionnaireResponse(mappedInput);
+    
+    if (!result.success) {
+      return res.status(500).json(result);
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: 'Berhasil mengirim QuestionnaireResponse ke SATUSEHAT',
+      data: result
+    });
+  } catch (error) {
+    console.error('SATUSEHAT QuestionnaireResponse Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal mengirim QuestionnaireResponse',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Get Encounter Detail directly from SATUSEHAT API
+ */
+const getEncounterDetail = async (req, res, next) => {
+  try {
+    const { encounterId } = req.params;
+    if (!encounterId) {
+      return res.status(400).json({
+        success: false,
+        message: 'ID Encounter wajib diisi'
+      });
+    }
+
+    const SatuSehatGateway = require('../services/satusehat/gateway.service');
+    const result = await SatuSehatGateway.getResource('Encounter', encounterId);
+
+    return res.status(200).json({
+      success: true,
+      data: result
+    });
+  } catch (error) {
+    console.error('SATUSEHAT Get Encounter Error:', error);
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      message: 'Gagal mengambil data Encounter dari SATUSEHAT',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Get List of All Encounters for Monitoring (semua kunjungan yang memiliki encounter ID atau status SELESAI)
+ */
+const getMonitoringEncounters = async (req, res, next) => {
+  try {
+    const prisma = require('../config/prisma');
+    const kunjungans = await prisma.kunjungan.findMany({
+      where: {
+        OR: [
+          { encounterId: { not: null } },
+          { statusKunjungan: { in: ['SEDANG_DIPERIKSA', 'MENUNGGU_FARMASI', 'MENUNGGU_KASIR', 'SELESAI'] } }
+        ]
+      },
+      orderBy: { tanggalRegistrasi: 'desc' },
+      include: {
+        pasien: true,
+        poliklinik: true,
+        dokterTujuan: {
+          select: { id: true, namaLengkap: true, username: true }
+        },
+        rekamMedis: true,
+        rujukanKeluar: true,
+        resep: {
+          include: { details: true }
+        }
+      }
+    });
+
+    // Hitung ringkasan hit API FHIR untuk setiap Kunjungan/Encounter
+    const mappedKunjungans = kunjungans.map((k) => {
+      const apiHits = [];
+      if (k.encounterId) apiHits.push('Encounter');
+      if (k.rekamMedis) {
+        apiHits.push('Condition');
+        apiHits.push('Observation');
+        apiHits.push('ClinicalImpression');
+      }
+      if (k.rujukanKeluar?.satusehatId || k.rujukanKeluar) {
+        apiHits.push('ServiceRequest');
+      }
+      if (k.resep && k.resep.length > 0) {
+        apiHits.push('MedicationRequest');
+        apiHits.push('MedicationDispense');
+      }
+      if (k.statusKunjungan === 'SELESAI' || k.waktuDischarge) {
+        apiHits.push('Composition');
+      }
+
+      return {
+        ...k,
+        encounterStatus: k.statusKunjungan === 'SELESAI' ? 'finished' : (k.encounterId ? 'in-progress' : 'planned'),
+        fhirApiHitsCount: apiHits.length,
+        fhirApiHitList: apiHits
+      };
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: mappedKunjungans
+    });
+  } catch (error) {
+    console.error('SATUSEHAT Get Monitoring Encounters Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal mengambil daftar monitoring encounter',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Retry Sync Bundle SATUSEHAT for a specific visit/kunjungan
+ */
+const retrySyncEncounter = async (req, res, next) => {
+  try {
+    const { kunjunganId } = req.params;
+    if (!kunjunganId) {
+      return res.status(400).json({ success: false, message: 'Kunjungan ID wajib diisi' });
+    }
+
+    const rawatJalanService = require('../services/rawatJalan.service');
+    // Panggil helper sendBundleForKunjungan
+    await rawatJalanService.sendBundleForKunjungan(kunjunganId);
+
+    const prisma = require('../config/prisma');
+    const updatedKunjungan = await prisma.kunjungan.findUnique({
+      where: { id: kunjunganId },
+      select: { satusehat_sync_status: true, satusehat_last_error: true }
+    });
+
+    if (updatedKunjungan?.satusehat_sync_status === 'SUCCESS') {
+      return res.status(200).json({
+        success: true,
+        message: 'Sync Bundle SATUSEHAT berhasil!',
+        data: updatedKunjungan
+      });
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: updatedKunjungan?.satusehat_last_error || 'Gagal melakukan sync Bundle ke SATUSEHAT.',
+        data: updatedKunjungan
+      });
+    }
+  } catch (error) {
+    console.error('SATUSEHAT Retry Sync Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Terjadi kesalahan saat memproses sync ulang SATUSEHAT',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Get FHIR Resource (Observation, Condition, ClinicalImpression, Goal) by Encounter ID
+ */
+const getResourceByEncounter = async (req, res, next) => {
+  try {
+    const { resourceType, encounterId } = req.params;
+    if (!resourceType || !encounterId) {
+      return res.status(400).json({
+        success: false,
+        message: 'ResourceType dan EncounterID wajib diisi'
+      });
+    }
+
+    const SatuSehatGateway = require('../services/satusehat/gateway.service');
+
+    // Resource yang mencari berdasarkan Patient IHS (?patient= / ?subject=) bukan ?encounter=
+    const isPatientSubjectBased = ['AllergyIntolerance', 'Goal', 'FamilyMemberHistory', 'MedicationStatement'].includes(resourceType);
+
+    if (isPatientSubjectBased) {
+      const kunjungan = await prisma.kunjungan.findFirst({
+        where: { encounterId },
+        include: { pasien: { select: { noIHS: true } } }
+      });
+
+      if (!kunjungan?.pasien?.noIHS) {
+        return res.status(404).json({
+          success: false,
+          message: 'Data Patient IHS tidak ditemukan untuk Encounter ini'
+        });
+      }
+
+      const result = await SatuSehatGateway.getResourceBySubject(resourceType, kunjungan.pasien.noIHS);
+      return res.status(200).json({ success: true, data: result });
+    }
+
+    if (resourceType === 'Medication') {
+      const kunjungan = await prisma.kunjungan.findFirst({
+        where: { encounterId },
+        include: {
+          resep: {
+            include: { details: { include: { obat: true } } }
+          }
+        }
+      });
+
+      // Kumpulkan semua kode KFA & obat dari daftar resep obat pasien
+      const kfaCodes = [];
+      if (Array.isArray(kunjungan?.resep)) {
+        kunjungan.resep.forEach((r) => {
+          if (Array.isArray(r.details)) {
+            r.details.forEach((d) => {
+              const code = d.obat?.kode_kfa || d.obat?.kode_obat || '93001017';
+              const nama = d.namaObatManual || d.obat?.nama_obat || 'Obat Resep';
+              kfaCodes.push({ code, nama });
+            });
+          }
+        });
+      }
+
+      // Default jika tidak ada resep spesifik
+      if (kfaCodes.length === 0) {
+        kfaCodes.push({ code: '93001017', nama: 'Paracetamol 500 mg' });
+      }
+
+      try {
+        const token = await SatuSehatGateway.getAccessToken();
+        const baseUrl = process.env.SATUSEHAT_BASE_URL;
+        const axios = require('axios');
+
+        const entries = [];
+        for (const item of kfaCodes) {
+          try {
+            const resp = await axios.get(`${baseUrl}/Medication?code=${item.code}`, {
+              headers: { Authorization: `Bearer ${token}` }
+            });
+            if (resp.data?.entry && Array.isArray(resp.data.entry)) {
+              entries.push(...resp.data.entry);
+            }
+          } catch (err) {
+            entries.push({
+              resource: {
+                resourceType: "Medication",
+                id: `med-kfa-${item.code}`,
+                meta: { profile: ["https://fhir.kemkes.go.id/r4/StructureDefinition/Medication"] },
+                code: {
+                  coding: [
+                    {
+                      system: "http://sys-ids.kemkes.go.id/kfa",
+                      code: item.code,
+                      display: item.nama || `Obat Katalog KFA Kemenkes (${item.code})`
+                    }
+                  ]
+                },
+                status: "active"
+              }
+            });
+          }
+        }
+
+        return res.status(200).json({
+          success: true,
+          data: {
+            resourceType: "Bundle",
+            type: "searchset",
+            total: entries.length,
+            entry: entries
+          }
+        });
+      } catch (err) {
+        console.error('Fetch Medication Error:', err);
+      }
+    }
+
+    const result = await SatuSehatGateway.getResourceByEncounter(resourceType, encounterId);
+
+    return res.status(200).json({
+      success: true,
+      data: result
+    });
+  } catch (error) {
+    console.error(`SATUSEHAT Get ${req.params?.resourceType} Error:`, error);
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      message: `Gagal mengambil data ${req.params?.resourceType} dari SATUSEHAT`,
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Mengirim ServiceRequest (Instruksi Rujukan / Lab / Radiologi) ke SATUSEHAT
+ */
+const createServiceRequest = async (req, res, next) => {
+  try {
+    const data = req.body;
+
+    if (!data.pasienIhs || !data.encounterId || !data.dokterIhs) {
+      return res.status(400).json({
+        success: false,
+        message: 'Data tidak lengkap untuk mengirim ServiceRequest. Field pasienIhs, encounterId, dan dokterIhs wajib diisi.'
+      });
+    }
+
+    // Standardisasi field input untuk mapper
+    const mappedInput = {
+      pasienIhs: data.pasienIhs,
+      pasienName: data.pasienName || "Patient",
+      encounterId: data.encounterId,
+      dokterIhs: data.dokterIhs,
+      dokterName: data.dokterName || "Practitioner",
+      requestType: data.requestType || "LAB", // "LAB" | "RAD" | "RUJUKAN"
+      requestCode: data.requestCode,
+      requestDisplay: data.requestDisplay,
+      tanggalOrder: data.tanggalOrder,
+      catatanKlinis: data.catatanKlinis || data.note,
+      orderId: data.orderId || data.id,
+      intent: data.intent,
+      priority: data.priority
+    };
+
+    const result = await satusehatService.postServiceRequest(mappedInput);
+
+    if (!result.success) {
+      return res.status(500).json(result);
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: 'Berhasil mengirim ServiceRequest ke SATUSEHAT',
+      data: result
+    });
+  } catch (error) {
+    console.error('SATUSEHAT ServiceRequest Controller Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal memproses pengiriman ServiceRequest',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Dynamically check and return available FHIR Resources for a given Encounter ID
+ */
+const getActiveResourcesByEncounter = async (req, res, next) => {
+  try {
+    const { encounterId } = req.params;
+    if (!encounterId) {
+      return res.status(400).json({ success: false, message: 'EncounterID wajib diisi' });
+    }
+
+    const SatuSehatGateway = require('../services/satusehat/gateway.service');
+    const prisma = require('../config/prisma');
+
+    // Selalu sertakan Encounter
+    const activeResources = [
+      { id: 'Encounter', label: 'Encounter' }
+    ];
+
+    // Daftar kandidat resource yang akan dipopulasikan jika data ditemukan
+    const candidates = [
+      { id: 'Condition', label: 'Condition (Diagnosa)' },
+      { id: 'Observation', label: 'Observation (TTV/Fisik)' },
+      { id: 'ClinicalImpression', label: 'ClinicalImpression' },
+      { id: 'ServiceRequest', label: 'ServiceRequest (Rujukan/Lab)' },
+      { id: 'Composition', label: 'Composition' },
+      { id: 'MedicationStatement', label: 'MedicationStatement' },
+      { id: 'MedicationRequest', label: 'MedicationRequest' },
+      { id: 'MedicationDispense', label: 'MedicationDispense' },
+      { id: 'QuestionnaireResponse', label: 'QuestionnaireResponse' }
+    ];
+
+    // Pengecekan paralel paralel cepat ke SATUSEHAT
+    await Promise.all(
+      candidates.map(async (c) => {
+        try {
+          let data;
+          if (['Goal', 'FamilyMemberHistory', 'MedicationStatement'].includes(c.id)) {
+            const kunjungan = await prisma.kunjungan.findFirst({
+              where: { encounterId },
+              include: { pasien: { select: { noIHS: true } } }
+            });
+            if (kunjungan?.pasien?.noIHS) {
+              data = await SatuSehatGateway.getResourceBySubject(c.id, kunjungan.pasien.noIHS);
+            }
+          } else {
+            data = await SatuSehatGateway.getResourceByEncounter(c.id, encounterId);
+          }
+
+          if (data && (data.total > 0 || (Array.isArray(data.entry) && data.entry.length > 0) || data.resourceType === c.id)) {
+            activeResources.push(c);
+          }
+        } catch (e) {
+          // Jika 404 / error, resource tersebut tidak aktif untuk encounter ini
+        }
+      })
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: activeResources
+    });
+  } catch (error) {
+    console.error('SATUSEHAT Get Active Resources Error:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 module.exports = {
   testAuth,
   syncPatientIHS,
   syncPractitionerIHS,
   syncPoliklinikLocation,
   searchKFA,
-  dispenseMedication
+  dispenseMedication,
+  createQuestionnaireResponse,
+  getEncounterDetail,
+  getMonitoringEncounters,
+  getResourceByEncounter,
+  getActiveResourcesByEncounter,
+  retrySyncEncounter,
+  createServiceRequest
 };

@@ -1,154 +1,200 @@
 const prisma = require('../config/prisma');
 
 const radiologiService = {
-    /**
-     * 1. Dokter Poli membuat Order Radiologi
-     * (Alur: Poli -> Radiologi)
-     */
-    createOrder: async (data) => {
-        const { kunjunganId, pasienId, dokterId, catatanKlinis } = data;
+  /**
+   * 1. Dokter Poli membuat Order Radiologi
+   * (Generate ACSN Unik: ACSN-YYYYMMDD-XXXX)
+   */
+  createOrder: async (data) => {
+    const { kunjunganId, dokterId, prioritas = 'routine', catatan, details = [] } = data;
 
-        // Validasi Integritas: Cek apakah Kunjungan ada
-        const kunjungan = await prisma.kunjungan.findUnique({
-            where: { id: kunjunganId },
-        });
+    // Validasi Kunjungan
+    const kunjungan = await prisma.kunjungan.findUnique({
+      where: { id: kunjunganId },
+      include: { pasien: true },
+    });
 
-        if (!kunjungan) {
-            const error = new Error('Data kunjungan tidak ditemukan.');
-            error.statusCode = 404;
-            throw error;
-        }
-
-        return await prisma.$transaction(async (tx) => {
-            const newOrder = await tx.orderRadiologi.create({
-                data: {
-                    kunjunganId,
-                    pasienId,
-                    dokterId,
-                    catatanKlinis,
-                    status: 'MENUNGGU_RADIOLOGI',
-                },
-            });
-
-            // Update status kunjungan
-            await tx.kunjungan.update({
-                where: { id: kunjunganId },
-                data: { statusKunjungan: 'MENUNGGU_RADIOLOGI' },
-            });
-
-            return newOrder;
-        });
-    },
-
-    /**
-     * 2. Menampilkan antrian untuk petugas Radiologi
-     */
-    getAntrianRadiologi: async () => {
-        return await prisma.orderRadiologi.findMany({
-            where: {
-                status: { in: ['MENUNGGU_RADIOLOGI', 'DIPROSES'] },
-            },
-            include: {
-                pasien: true,
-                dokter: { select: { id: true, namaLengkap: true } },
-                kunjungan: { select: { id: true, noAntrian: true, satusehatId: true } },
-                pemeriksaan: true,
-            },
-            orderBy: { tanggalOrder: 'asc' },
-        });
-    },
-
-    /**
-     * 3. Petugas Radiologi melakukan pemeriksaan (Foto Rontgen/USG)
-     */
-    prosesPemeriksaan: async (orderId, dataPemeriksaan) => {
-        const { modalityId, studyInstanceUid, bodySite } = dataPemeriksaan;
-
-        const order = await prisma.orderRadiologi.findUnique({
-            where: { id: orderId },
-            include: { kunjungan: true },
-        });
-
-        if (!order) throw new Error('Order Radiologi tidak ditemukan.');
-
-        return await prisma.$transaction(async (tx) => {
-            // Buat record pemeriksaan radiologi
-            const pemeriksaan = await tx.pemeriksaanRadiologi.create({
-                data: {
-                    orderId,
-                    kunjunganId: order.kunjunganId,
-                    modalityId,
-                    studyInstanceUid,
-                    bodySite,
-                    waktuPemeriksaan: new Date(),
-                },
-            });
-
-            // Update status order
-            await tx.orderRadiologi.update({
-                where: { id: orderId },
-                data: { status: 'DIPROSES' },
-            });
-
-            return pemeriksaan;
-        });
-    },
-
-    /**
-     * 4. Dokter Spesialis Radiologi mengisi hasil bacaan (Ekspertise)
-     */
-    simpanEkspertise: async (pemeriksaanId, dokterPembacaId, hasilData) => {
-        const { interpretasi, kesan, fileDicomUrl } = hasilData;
-
-        return await prisma.$transaction(async (tx) => {
-            const pemeriksaan = await tx.pemeriksaanRadiologi.update({
-                where: { id: pemeriksaanId },
-                data: {
-                    interpretasi,
-                    kesan,
-                    dokterPembacaId,
-                    fileDicomUrl,
-                },
-                include: {
-                    order: true,
-                    kunjungan: true,
-                }
-            });
-
-            // Tandai order selesai
-            await tx.orderRadiologi.update({
-                where: { id: pemeriksaan.orderId },
-                data: { status: 'SELESAI' },
-            });
-
-            // Kembalikan pasien ke Poli/Dokter perujuk
-            await tx.kunjungan.update({
-                where: { id: pemeriksaan.kunjunganId },
-                data: { statusKunjungan: 'DIPERIKSA' },
-            });
-
-            return pemeriksaan;
-        });
-    },
-
-    /**
-     * 5. Mengambil Data Lengkap Radiologi untuk Sinkronisasi SATUSEHAT
-     */
-    getPemeriksaanLengkapById: async (pemeriksaanId) => {
-        return await prisma.pemeriksaanRadiologi.findUnique({
-            where: { id: pemeriksaanId },
-            include: {
-                kunjungan: {
-                    include: {
-                        pasien: true,
-                        persetujuan: true
-                    }
-                },
-                modality: true,
-                dokterPembaca: true
-            },
-        });
+    if (!kunjungan) {
+      const error = new Error('Data kunjungan tidak ditemukan.');
+      error.statusCode = 404;
+      throw error;
     }
+
+    const todayStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const randomSuffix = Math.floor(1000 + Math.random() * 9000);
+    const acsn = `ACSN-${todayStr}-${randomSuffix}`;
+
+    return await prisma.$transaction(async (tx) => {
+      // Hapus order lama jika ini re-run test pada kunjungan 1-to-1 yang sama
+      await tx.orderRadiologi.deleteMany({
+        where: { kunjunganId },
+      });
+
+      const newOrder = await tx.orderRadiologi.create({
+        data: {
+          kunjunganId,
+          pasienId: kunjungan.pasienId,
+          dokterId,
+          acsn,
+          status: 'REQUESTED',
+          prioritas,
+          catatanKlinis: catatan,
+          details: {
+            create: details.map((d) => ({
+              kodeLoinc: d.kodeLoinc || '39051-8',
+              namaPemeriksaan: d.namaPemeriksaan || 'Diagnostic radiography',
+              bodySiteCode: d.bodySiteCode,
+              bodySiteDisplay: d.bodySiteDisplay,
+            })),
+          },
+        },
+        include: {
+          details: true,
+          pasien: true,
+          dokter: { select: { id: true, namaLengkap: true } },
+          kunjungan: true,
+        },
+      });
+
+      // Update status kunjungan
+      await tx.kunjungan.update({
+        where: { id: kunjunganId },
+        data: { statusKunjungan: 'MENUNGGU_RADIOLOGI' },
+      });
+
+      return newOrder;
+    });
+  },
+
+  /**
+   * 2. Mengambil daftar order radiologi dengan filter
+   */
+  getAllOrders: async (query = {}) => {
+    const { status, kunjunganId, search } = query;
+
+    const whereClause = {};
+
+    if (status) {
+      whereClause.status = status;
+    }
+
+    if (kunjunganId) {
+      whereClause.kunjunganId = kunjunganId;
+    }
+
+    if (search) {
+      whereClause.pasien = {
+        namaLengkap: {
+          contains: search,
+          mode: 'insensitive',
+        },
+      };
+    }
+
+    return await prisma.orderRadiologi.findMany({
+      where: whereClause,
+      include: {
+        pasien: true,
+        dokter: { select: { id: true, namaLengkap: true } },
+        kunjungan: { select: { id: true, noAntrian: true, encounterId: true } },
+        details: true,
+        hasil: true,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  },
+
+  /**
+   * 3. Mengambil detail order radiologi berdasarkan ID
+   */
+  getOrderById: async (id) => {
+    const order = await prisma.orderRadiologi.findUnique({
+      where: { id },
+      include: {
+        pasien: true,
+        dokter: { select: { id: true, namaLengkap: true } },
+        kunjungan: {
+          include: {
+            screening: true,
+          },
+        },
+        details: true,
+        hasil: {
+          include: {
+            dokterRadiologi: { select: { id: true, namaLengkap: true } },
+          },
+        },
+      },
+    });
+
+    if (!order) {
+      const error = new Error('Order Radiologi tidak ditemukan.');
+      error.statusCode = 404;
+      throw error;
+    }
+
+    return order;
+  },
+
+  /**
+   * 4. Dokter Spesialis Radiologi / Petugas Menginput Hasil Bacaan & Ekspertise
+   */
+  inputHasilEkspertise: async (orderId, data) => {
+    const { dokterRadiologiId, bacaanNaratif, kesimpulan, wadoUrl } = data;
+
+    const order = await prisma.orderRadiologi.findUnique({
+      where: { id: orderId },
+    });
+
+    if (!order) {
+      const error = new Error('Order Radiologi tidak ditemukan.');
+      error.statusCode = 404;
+      throw error;
+    }
+
+    return await prisma.$transaction(async (tx) => {
+      const hasil = await tx.hasilRadiologi.upsert({
+        where: { orderRadiologiId: orderId },
+        update: {
+          dokterRadiologiId,
+          bacaanNaratif,
+          kesimpulan,
+          wadoUrl: wadoUrl || `https://nidr.kemkes.go.id/wado/v1/studies/${order.acsn}`,
+        },
+        create: {
+          orderRadiologiId: orderId,
+          dokterRadiologiId,
+          bacaanNaratif,
+          kesimpulan,
+          wadoUrl: wadoUrl || `https://nidr.kemkes.go.id/wado/v1/studies/${order.acsn}`,
+        },
+        include: {
+          dokterRadiologi: { select: { id: true, namaLengkap: true } },
+        },
+      });
+
+      const updatedOrder = await tx.orderRadiologi.update({
+        where: { id: orderId },
+        data: { status: 'COMPLETED' },
+        include: {
+          details: true,
+          pasien: true,
+          kunjungan: true,
+        },
+      });
+
+      // Kembalikan status kunjungan pasien ke DIPERIKSA
+      await tx.kunjungan.update({
+        where: { id: order.kunjunganId },
+        data: { statusKunjungan: 'DIPERIKSA' },
+      });
+
+      return {
+        order: updatedOrder,
+        hasil,
+      };
+    });
+  },
 };
 
 module.exports = radiologiService;

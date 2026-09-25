@@ -35,6 +35,7 @@ model User {
   // Relasi Radiologi Baru
   orderRadiologi   OrderRadiologi[]       @relation("DokterOrderRadiologi")
   bacaRadiologi    PemeriksaanRadiologi[] @relation("DokterBacaRadiologi")
+  hasilRadiologi   HasilRadiologi[]       @relation("DokterHasilRadiologi")
   
   penginputRekamMedis RekamMedis[] @relation("PenginputRekamMedis")
   penginputDiagnosis DiagnosisPasien[] @relation("PenginputDiagnosis")
@@ -56,8 +57,7 @@ model Pasien {
   id              String      @id @default(cuid())
   noRM            String      @unique
   noIHS           String?     @unique
-  satusehat_ihs   String?
-  nik             String      @unique
+  nik             String?     @unique
   noKk            String?
   noPaspor        String?
   noKitas         String?
@@ -197,7 +197,7 @@ model Kunjungan {
   pasienId        String
   pasien          Pasien      @relation(fields: [pasienId], references: [id], onDelete: Cascade)
   
-  satusehatId     String?     @unique // ID Encounter dari SATUSEHAT (PONDASI UTAMA)
+  encounterId       String?     @unique // ID Encounter dari SATUSEHAT (PONDASI UTAMA)
 
   tanggalRegistrasi DateTime
   jamRegistrasi     String
@@ -214,9 +214,6 @@ model Kunjungan {
   caraDatang        String      // Datang sendiri, Ambulans, Rujukan
   
   noSep             String?
-  encounterId       String?     // ID Encounter dari SATUSEHAT
-  satusehatSync     Json?       // Tracking sinkronisasi SATUSEHAT
-  satusehat_encounter_id String?
   satusehat_sync_status  String   @default("PENDING")
   satusehat_last_error    String?  @db.Text
 
@@ -357,6 +354,7 @@ model Screening {
   catatanPetugas      String?
 
   observationIds      Json?     // Array of SATUSEHAT Observation UUIDs
+  headToToe           Json?     // Object penampung 28 organ pemeriksaan fisik Head to Toe (SATUSEHAT)
 
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
@@ -383,6 +381,9 @@ model RekamMedis {
   kesadaran               String?
   pemeriksaanFisik        String?   @db.Text
   hasilPenunjang          String?   @db.Text
+  odontogram              Json?     // Interactive Odontogram FDI Map
+  dmft                    Json?     // Indeks DMF-T (D, M, F, Total)
+  oralFindings            Json?     // Occlusi, Torus, Palatum, Diastema, Anomali
 
   // A - Asesmen
   diagnosisKlinis         String?   @db.Text
@@ -657,8 +658,12 @@ model RujukanKeluar {
   
   faskesTujuan    String
   poliTujuan      String
+  dokterTujuan    String?     // Dokter Spesialis Tujuan (Teman Sejawat)
   alasanRujukan   String      @db.Text
   tanggalRujukan  DateTime    @default(now())
+
+  // Bridging SATUSEHAT FHIR
+  satusehatId     String?     @unique // ID ServiceRequest di SATUSEHAT
 }
 
 // ==========================================
@@ -732,7 +737,8 @@ model OrderRadiologi {
   intent          String      @default("original-order")
   priority        String      @default("routine")
   categoryCode    String?     @default("363679005")      // Kode SNOMED CT (363679005 = Imaging)
-  requestCode     String?                                 // Kode DICOM / SNOMED
+  requestCode     String?                                 // Kode DICOM / SNOMED / LOINC
+  acsn            String?     @unique                     // Accession Number unik lokal (misal: ACSN-20260730-001)
 
   kunjunganId     String      @unique
   kunjungan       Kunjungan   @relation(fields: [kunjunganId], references: [id], onDelete: Cascade)
@@ -743,14 +749,53 @@ model OrderRadiologi {
   dokterId        String
   dokter          User        @relation("DokterOrderRadiologi", fields: [dokterId], references: [id])
   
-  status          String      @default("MENUNGGU_RADIOLOGI") // MENUNGGU_RADIOLOGI, DIPROSES, SELESAI, DIBATALKAN
+  status          String      @default("MENUNGGU_RADIOLOGI") // MENUNGGU_RADIOLOGI, REQUESTED, IN_PROGRESS, COMPLETED, CANCELLED
   catatanKlinis   String?     @db.Text
+  prioritas       String      @default("routine")            // routine / stat
   tanggalOrder    DateTime    @default(now())
   
   satusehatSync   Json?
 
+  details         DetailOrderRadiologi[]
+  hasil           HasilRadiologi?
   pemeriksaan     PemeriksaanRadiologi[]
   laporanDiagnostik LaporanDiagnostik?
+
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+}
+
+model DetailOrderRadiologi {
+  id              String         @id @default(cuid())
+  orderRadiologiId String
+  orderRadiologi  OrderRadiologi @relation(fields: [orderRadiologiId], references: [id], onDelete: Cascade)
+
+  kodeLoinc       String         // Kode LOINC (misal: 39051-8)
+  namaPemeriksaan String         // Display LOINC (misal: XR Thorax AP)
+  bodySiteCode    String?        // Kode SNOMED CT lokasi anatomis
+  bodySiteDisplay String?        // Display SNOMED CT lokasi anatomis
+
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+}
+
+model HasilRadiologi {
+  id                  String         @id @default(cuid())
+  orderRadiologiId    String         @unique
+  orderRadiologi      OrderRadiologi @relation(fields: [orderRadiologiId], references: [id], onDelete: Cascade)
+
+  dokterRadiologiId   String?
+  dokterRadiologi     User?          @relation("DokterHasilRadiologi", fields: [dokterRadiologiId], references: [id])
+
+  wadoUrl             String?        @db.Text // URL WADO dari NIDR / PACS
+  imagingStudyId      String?        // ID ImagingStudy SATUSEHAT
+  bacaanNaratif       String?        @db.Text // Observation (Hasil Ekspertise)
+  kesimpulan          String?        @db.Text // DiagnosticReport (Kesan)
+  observationId       String?        // ID Observation SATUSEHAT
+  diagnosticReportId  String?        // ID DiagnosticReport SATUSEHAT
+
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
 }
 
 // Wadah Utama ImagingStudy (One-to-Many terhadap Order & Kunjungan)

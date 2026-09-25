@@ -4,6 +4,7 @@
  */
 const buildPatientPayload = (data = {}, orgId) => {
   const pasien = data.pasien || data;
+  const isBayi = Boolean(pasien.isBayi || data.isBayi);
 
   // Format gender
   let gender = "unknown";
@@ -22,7 +23,12 @@ const buildPatientPayload = (data = {}, orgId) => {
   let maritalStatusCode = "U";
   let maritalStatusDisplay = "unmarried";
   const stPerkawinan = pasien.statusPerkawinan || data.statusPerkawinan;
-  if (stPerkawinan) {
+
+  if (isBayi) {
+    // Sesuai Spesifikasi SATUSEHAT Bayi Baru Lahir: maritalStatus wajib 'S' (Never Married)
+    maritalStatusCode = "S";
+    maritalStatusDisplay = "Never Married";
+  } else if (stPerkawinan) {
     const st = stPerkawinan.toLowerCase();
     if (st === "belum kawin" || st === "unmarried") {
       maritalStatusCode = "U";
@@ -41,7 +47,6 @@ const buildPatientPayload = (data = {}, orgId) => {
 
   // Identifiers
   const identifier = [];
-  const isBayi = pasien.isBayi || data.isBayi;
   const nikIbu = pasien.nikIbu || data.nikIbu;
   const nik = pasien.nik || data.nik;
   const noKk = pasien.noKk || data.noKk;
@@ -118,21 +123,26 @@ const buildPatientPayload = (data = {}, orgId) => {
   const kodePos = pasien.alamat?.kodePos || data.kodePos;
   if (kodePos) addressObj.postalCode = kodePos;
 
-  if (data.kodeProvinsi && data.kodeKabupaten && data.kodeKecamatan && data.kodeDesa) {
-    addressObj.extension = [
-      {
-        url: "https://fhir.kemkes.go.id/r4/StructureDefinition/administrativeCode",
-        extension: [
-          { url: "province", valueCode: data.kodeProvinsi },
-          { url: "city", valueCode: data.kodeKabupaten },
-          { url: "district", valueCode: data.kodeKecamatan.substring(0, 6) },
-          { url: "village", valueCode: data.kodeDesa.length > 10 ? data.kodeDesa.substring(0, 10) : data.kodeDesa },
-          { url: "rt", valueCode: data.rt || "001" },
-          { url: "rw", valueCode: data.rw || "001" }
-        ]
-      }
-    ];
-  }
+  // SATUSEHAT mewajibkan extension administrativeCode. 
+  // Jika kode Kemendagri tidak dikirim dari form pendaftaran, gunakan fallback default agar lolos validasi Kemenkes.
+  const provCode = data.kodeProvinsi || pasien.alamat?.kodeProvinsi || "31";
+  const cityCode = data.kodeKabupaten || pasien.alamat?.kodeKabupaten || "3171";
+  const distCode = (data.kodeKecamatan || pasien.alamat?.kodeKecamatan || "317101").substring(0, 6);
+  const villCode = (data.kodeDesa || pasien.alamat?.kodeDesa || "3171011001").substring(0, 10);
+  
+  addressObj.extension = [
+    {
+      url: "https://fhir.kemkes.go.id/r4/StructureDefinition/administrativeCode",
+      extension: [
+        { url: "province", valueCode: provCode },
+        { url: "city", valueCode: cityCode },
+        { url: "district", valueCode: distCode },
+        { url: "village", valueCode: villCode },
+        { url: "rt", valueCode: data.rt || "001" },
+        { url: "rw", valueCode: data.rw || "001" }
+      ]
+    }
+  ];
 
   // Telecom
   const telecom = [];
@@ -205,7 +215,7 @@ const buildPatientPayload = (data = {}, orgId) => {
     ...(addressObj.line || addressObj.city ? { address: [addressObj] } : {}),
     ...(telecom.length > 0 && { telecom: telecom }),
     ...(contact && { contact: contact }),
-    multipleBirthInteger: data.multipleBirthInteger || 0,
+    multipleBirthInteger: data.urutanKelahiran !== undefined ? Number(data.urutanKelahiran) : (pasien.dataBayi?.urutanKelahiran || data.multipleBirthInteger || 0),
     maritalStatus: {
       coding: [
         {

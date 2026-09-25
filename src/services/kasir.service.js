@@ -3,7 +3,15 @@ const prisma = require('../config/prisma');
 const getAntrianKasir = async () => {
   return await prisma.kunjungan.findMany({
     where: {
-      statusKunjungan: 'MENUNGGU_KASIR',
+      OR: [
+        { statusKunjungan: 'MENUNGGU_KASIR' },
+        { 
+          statusKunjungan: 'MENUNGGU_FARMASI',
+          tagihan: {
+            statusTagihan: 'BELUM_LUNAS'
+          }
+        }
+      ]
     },
     include: {
       pasien: {

@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 const buildFamilyMemberHistoryPayload = (data) => {
   const codeSystem = data.snomedCode ? "http://snomed.info/sct" : (data.codeSystem || "http://hl7.org/fhir/sid/icd-10");
   const codeVal = data.snomedCode || data.icd10Kode || "Z82.9";
@@ -32,14 +33,39 @@ const buildFamilyMemberHistoryPayload = (data) => {
   return {
     resourceType: "FamilyMemberHistory",
     status: data.status || "completed",
+=======
+/**
+ * FHIR R4 FamilyMemberHistory Mapper
+ */
+const buildFamilyMemberHistoryPayload = (data) => {
+  const relMap = {
+    'Orang Tua': { code: 'FTH', display: 'father' },
+    'Ayah': { code: 'FTH', display: 'father' },
+    'Ibu': { code: 'MTH', display: 'mother' },
+    'Saudara': { code: 'SIB', display: 'sibling' },
+    'Kakek/Nenek': { code: 'GRPRN', display: 'grandparent' },
+    'Keluarga': { code: 'FAMMEMB', display: 'family member' }
+  };
+
+  const rel = relMap[data.hubungan] || { code: 'FAMMEMB', display: 'family member' };
+
+  return {
+    resourceType: "FamilyMemberHistory",
+    status: "completed",
+>>>>>>> 251f5e81bda75763bd2204a8f5d79c81a92ee683
     patient: {
       reference: `Patient/${data.pasienIhs}`,
       display: data.pasienName
     },
+<<<<<<< HEAD
+=======
+    date: new Date().toISOString(),
+>>>>>>> 251f5e81bda75763bd2204a8f5d79c81a92ee683
     relationship: {
       coding: [
         {
           system: "http://terminology.hl7.org/CodeSystem/v3-RoleCode",
+<<<<<<< HEAD
           code: data.hubunganKode || "FAMMEMB",
           display: data.hubunganNama || "Family member"
         }
@@ -47,6 +73,27 @@ const buildFamilyMemberHistoryPayload = (data) => {
     },
     ...(data.deceasedBoolean !== undefined && { deceasedBoolean: Boolean(data.deceasedBoolean) }),
     condition: [conditionItem]
+=======
+          code: rel.code,
+          display: rel.display
+        }
+      ]
+    },
+    condition: [
+      {
+        code: {
+          coding: [
+            {
+              system: "http://snomed.info/sct",
+              code: data.kodeSnomed || "160303001",
+              display: data.namaPenyakit || "Family history of medical condition"
+            }
+          ],
+          text: data.namaPenyakit || "Family history of medical condition"
+        }
+      }
+    ]
+>>>>>>> 251f5e81bda75763bd2204a8f5d79c81a92ee683
   };
 };
 

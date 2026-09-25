@@ -20,6 +20,7 @@ const createScreening = async (data, petugasId) => {
         riwayatOperasi: data.riwayatOperasi || null,
         riwayatRawatInap: data.riwayatRawatInap || null,
         riwayatTransfusi: data.riwayatTransfusi || null,
+        riwayatPengobatan: data.riwayatPengobatan || null,
       },
       // Step 3 - Gaya Hidup & PTM
       gayaHidup: {
@@ -56,7 +57,22 @@ const createScreening = async (data, petugasId) => {
         jiwaPsikologis: data.jiwaPsikologis || [],
         jiwaBunuhDiri: data.jiwaBunuhDiri || [],
         jiwaZat: data.jiwaZat || [],
-        jiwaRiwayat: data.jiwaRiwayat || [],
+        statusPsikologis: data.statusPsikologis || 'Tenang / Normal',
+      },
+      antropometri: {
+        luasPermukaanTubuh: data.luasPermukaanTubuh ? parseFloat(data.luasPermukaanTubuh) : null,
+      },
+      // Skrining Khusus Poli Gigi & Mulut
+      gigi: {
+        golonganDarah: data.golonganDarah || null,
+        rhesus: data.rhesus || null,
+        statusKehamilan: data.statusKehamilan || null,
+        debrisIndex: data.debrisIndex !== undefined ? parseFloat(data.debrisIndex) : null,
+        kalkulusIndex: data.kalkulusIndex !== undefined ? parseFloat(data.kalkulusIndex) : null,
+        skorOhis: data.skorOhis !== undefined ? parseFloat(data.skorOhis) : null,
+        interpretasiOhis: data.interpretasiOhis || null,
+        riwayatAlergiAnestesi: data.riwayatAlergiAnestesi || null,
+        riwayatPengencerDarah: data.riwayatPengencerDarah || null,
       },
       // Catatan per-step
       catatan: {
@@ -69,6 +85,17 @@ const createScreening = async (data, petugasId) => {
         catatanKesehatanJiwa: data.catatanKesehatanJiwa || null,
       },
     };
+
+    // Update data Golongan Darah & Rhesus di Master Pasien jika diisi saat Skrining
+    if (data.golonganDarah || data.rhesus) {
+      await tx.pasien.update({
+        where: { id: data.pasienId },
+        data: {
+          ...(data.golonganDarah && { golonganDarah: data.golonganDarah }),
+          ...(data.rhesus && { rhesus: data.rhesus })
+        }
+      });
+    }
 
     // 1. Simpan data screening ke database
     const screening = await tx.screening.create({
@@ -100,6 +127,7 @@ const createScreening = async (data, petugasId) => {
         catatanPetugas: data.catatanPetugas || null,
         // Semua data tambahan (JSON)
         dataTambahan,
+        headToToe: data.headToToe || null,
       },
     });
 
@@ -265,15 +293,17 @@ const sendObservationToSatuSehat = async (screeningId) => {
       });
     }
 
+    // [DINONAKTIFKAN] Observation sekarang dikirim via Bundle Transaction saat dokter klik "Selesaikan Pemeriksaan"
+    // Kode di bawah ini tetap disimpan untuk referensi jika ingin mengirim Observation secara individual di masa depan.
+    /*
     // Send all observations in 1 Bundle Transaction
     let observationIds = [];
     if (observationPayloads.length > 0) {
       try {
         const resBundle = await satusehatService.createObservationBundle(observationPayloads);
         if (resBundle && resBundle.success) {
-          // Map array of strings to objects for saving to DB
           observationIds = resBundle.observationIds.map((id, index) => ({
-            type: `Observation_${index + 1}`, // Simplified naming
+            type: `Observation_${index + 1}`,
             id: id
           }));
         }
@@ -289,7 +319,6 @@ const sendObservationToSatuSehat = async (screeningId) => {
         data: { observationIds: observationIds }
       });
       
-      // Update satusehatSync on Kunjungan
       const syncStatus = (typeof kunjungan.satusehatSync === 'object' && kunjungan.satusehatSync !== null) 
         ? { ...kunjungan.satusehatSync } 
         : {};
@@ -303,6 +332,8 @@ const sendObservationToSatuSehat = async (screeningId) => {
 
       console.log('Berhasil sinkron Observation TTV ke SATUSEHAT:', observationIds);
     }
+    */
+    console.log(`[Screening] Data vital signs disimpan ke DB lokal. Akan dikirim ke SATUSEHAT via Bundle saat pemeriksaan selesai.`);
   } catch (err) {
     console.error('Gagal sinkron Observation TTV:', err.message);
   }

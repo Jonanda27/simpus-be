@@ -2,6 +2,7 @@ const axios = require('axios');
 const crypto = require('crypto');
 const satusehatConfig = require('../config/satusehat');
 const { createFhirClient, generateAccessToken } = require('../utils/satusehat-client');
+const { buildRelatedPersonPayload, buildQuestionnaireResponsePayload } = require('../utils/fhir-mappers');
 
 /**
  * Search Patient by NIK (Nomor Induk Kependudukan)
@@ -38,6 +39,33 @@ const getPatientByNIK = async (nik) => {
     throw new Error('Terjadi kesalahan saat mencari pasien di SATUSEHAT');
   }
 };
+/**
+ * Search Patient (Ibu) by NIK Ibu
+ * @param {string} nikIbu - NIK Ibu Pasien
+ * @returns {Promise<Object>} Patient Data Ibu (termasuk IHS Number)
+ */
+const getPatientByNIKIbu = async (nikIbu) => {
+  try {
+    const fhirClient = await createFhirClient();
+    const response = await fhirClient.get(`/Patient?identifier=https://fhir.kemkes.go.id/id/nik-ibu|${nikIbu}`);
+    
+    if (response.data && response.data.entry && response.data.entry.length > 0) {
+      return {
+        success: true,
+        data: response.data.entry.map(e => e.resource),
+        total: response.data.total || response.data.entry.length
+      };
+    } else {
+      return {
+        success: false,
+        message: 'Pasien bayi baru lahir dengan NIK Ibu tersebut tidak ditemukan'
+      };
+    }
+  } catch (error) {
+    console.error(`[SATUSEHAT] Error searching patient by NIK Ibu ${nikIbu}:`, error.response?.data || error.message);
+    throw new Error('Terjadi kesalahan saat mencari pasien bayi di SATUSEHAT');
+  }
+};
 
 /**
  * Pendaftaran Pasien Baru ke SATUSEHAT
@@ -72,6 +100,36 @@ const createPatient = async (data) => {
     const errorMessage = issue?.diagnostics || issue?.details?.text || error.message;
     console.error(`[SATUSEHAT] Error creating patient for NIK ${data.nik}:`, error.response?.data ? JSON.stringify(error.response?.data, null, 2) : error.message);
     throw new Error(errorMessage || 'Terjadi kesalahan saat mendaftarkan pasien ke SATUSEHAT');
+  }
+};
+
+/**
+ * Step 2.b: POST RelatedPerson ke SATUSEHAT dan menautkannya dengan Ibu
+ * @param {Object} data - data bayi & ibu pasien
+ * @param {string} bayiIhs - Nomor IHS Bayi
+ * @param {string} ibuIhs - Nomor IHS Ibu
+ * @returns {Promise<Object>} Response dengan RelatedPerson ID
+ */
+const createRelatedPerson = async (data, bayiIhs, ibuIhs) => {
+  try {
+    const fhirClient = await createFhirClient();
+
+    const payload = buildRelatedPersonPayload(data, bayiIhs, ibuIhs);
+
+    console.log("[SATUSEHAT] Mengirim POST /RelatedPerson:", JSON.stringify(payload, null, 2));
+    const response = await fhirClient.post('/RelatedPerson', payload);
+
+    return {
+      success: true,
+      data: response.data,
+      relatedPersonId: response.data.id
+    };
+  } catch (error) {
+    console.error("[SATUSEHAT] Error creating RelatedPerson:", error.response?.data || error.message);
+    return {
+      success: false,
+      message: error.message
+    };
   }
 };
 
@@ -487,6 +545,40 @@ const postMedicationDispense = async (data) => {
     throw new Error('SATUSEHAT_ORG_ID belum dikonfigurasi di file .env');
   }
 
+  // Cari ID Lokasi Poliklinik (ihsLocationId) dari database SIMPUS secara dinamis
+  let locationId = data.locationId || '';
+  let locationName = data.locationName || 'Depo Farmasi SIMPUS';
+
+  if (!locationId && data.encounterId) {
+    try {
+      const prisma = require('../config/prisma');
+      const kunjungan = await prisma.kunjungan.findFirst({
+        where: {
+          OR: [
+            { encounterId: data.encounterId },
+            { id: data.resepId } // fallback ke resep.kunjunganId
+          ]
+        },
+        include: {
+          poliklinik: true
+        }
+      });
+      if (kunjungan && kunjungan.poliklinik) {
+        locationId = kunjungan.poliklinik.ihsLocationId || '';
+        locationName = kunjungan.poliklinik.namaPoli || 'Depo Farmasi SIMPUS';
+        console.log(`[SATUSEHAT] Ditemukan lokasi poliklinik dinamis: ${locationName} (${locationId})`);
+      }
+    } catch (dbError) {
+      console.warn(`[SATUSEHAT] Gagal mencari lokasi poliklinik dari DB:`, dbError.message);
+    }
+  }
+
+  // Fallback cadangan dari config .env jika SIMPUS belum sinkron Location ID
+  if (!locationId) {
+    locationId = satusehatConfig.SATUSEHAT_FARMASI_LOCATION_ID || 'd8226063-4712-4217-a021-9988ff885544';
+    locationName = 'Depo Farmasi Klinik';
+  }
+
   // 1. Kirim Medication (Definisi Obat yang diserahkan)
   const uniqueMedDispId = data.resepDetailId ? `${data.resepDetailId}-disp` : null;
   const medicationPayload = buildMedicationPayload(data, orgId, uniqueMedDispId);
@@ -502,8 +594,66 @@ const postMedicationDispense = async (data) => {
     throw new Error(`SATUSEHAT Error: ${diag}`);
   }
 
-  // 2. Kirim MedicationDispense (Penyerahan)
-  const dispensePayload = buildMedicationDispensePayload(data, medicationId, orgId);
+  // 2. Cari MedicationRequest yang berpasangan dengan encounterId & kodeObat di SATUSEHAT
+  let medicationRequestId = data.medicationRequestId || '';
+  if (!medicationRequestId && data.encounterId) {
+    try {
+      console.log(`[SATUSEHAT] Mencari MedicationRequest untuk Encounter: ${data.encounterId}`);
+      const searchResponse = await fhirClient.get(`/MedicationRequest?encounter=${data.encounterId}`);
+      if (searchResponse.data && searchResponse.data.entry && searchResponse.data.entry.length > 0) {
+        // Cari entry yang memiliki kode obat (KFA code) sesuai
+        const matchEntry = searchResponse.data.entry.find(e => {
+          const resource = e.resource;
+          const codeableConcept = resource.medicationCodeableConcept;
+          if (codeableConcept && codeableConcept.coding) {
+            return codeableConcept.coding.some(c => c.code === data.kodeObat);
+          }
+          // Jika menggunakan medicationReference, periksa display atau referensinya
+          const medRef = resource.medicationReference;
+          if (medRef && medRef.display) {
+            return medRef.display.toLowerCase().includes(data.namaObat?.toLowerCase());
+          }
+          return false;
+        });
+
+        if (matchEntry) {
+          medicationRequestId = matchEntry.resource.id;
+          console.log(`[SATUSEHAT] Ditemukan MedicationRequest ID matching: ${medicationRequestId}`);
+        } else {
+          // Fallback ambil entry pertama jika tidak ada yang exact match
+          medicationRequestId = searchResponse.data.entry[0].resource.id;
+          console.log(`[SATUSEHAT] Ditemukan MedicationRequest ID fallback (first entry): ${medicationRequestId}`);
+        }
+      }
+    } catch (searchError) {
+      console.warn(`[SATUSEHAT] Gagal mencari MedicationRequest secara otomatis:`, searchError.message);
+    }
+  }
+
+  // Jika tetap tidak ditemukan, kita buat MedicationRequest bayangan (dummy) terlebih dahulu agar alur rujukan SATUSEHAT tetap valid
+  if (!medicationRequestId) {
+    try {
+      console.log(`[SATUSEHAT] MedicationRequest tidak ditemukan. Membuat MedicationRequest baru secara dinamis...`);
+      const buildRequestData = {
+        ...data,
+        medicationId: medicationId
+      };
+      const medReqPayload = buildMedicationRequestPayload(buildRequestData, medicationId, orgId);
+      const reqResponse = await fhirClient.post('/MedicationRequest', medReqPayload);
+      medicationRequestId = reqResponse.data.id;
+      console.log(`[SATUSEHAT] Berhasil membuat MedicationRequest dinamis: ${medicationRequestId}`);
+    } catch (createReqError) {
+      console.error(`[SATUSEHAT] Gagal membuat MedicationRequest dinamis:`, createReqError.response?.data || createReqError.message);
+    }
+  }
+
+  // 3. Kirim MedicationDispense (Penyerahan)
+  const dispensePayload = buildMedicationDispensePayload({
+    ...data,
+    medicationRequestId,
+    locationId,
+    locationName
+  }, medicationId, orgId);
   console.log("[SATUSEHAT] Mengirim MedicationDispense Payload:", JSON.stringify(dispensePayload, null, 2));
   
   try {
@@ -544,13 +694,74 @@ const createQuestionnaireResponse = async (data) => {
   }
 };
 
+/**
+ * Mengirim QuestionnaireResponse ke SATUSEHAT
+ * @param {Object} data - Input data pengkajian kuesioner
+ * @returns {Promise<Object>} Response dengan QuestionnaireResponse ID
+ */
+const postQuestionnaireResponse = async (data) => {
+  try {
+    const fhirClient = await createFhirClient();
+    const orgId = satusehatConfig.SATUSEHAT_ORG_ID;
+    const payload = buildQuestionnaireResponsePayload(data, orgId);
+
+    console.log("[SATUSEHAT] Mengirim POST /QuestionnaireResponse:", JSON.stringify(payload, null, 2));
+    const response = await fhirClient.post('/QuestionnaireResponse', payload);
+
+    return {
+      success: true,
+      data: response.data,
+      questionnaireResponseId: response.data.id
+    };
+  } catch (error) {
+    console.error("[SATUSEHAT] Error creating QuestionnaireResponse:", error.response?.data || error.message);
+    return {
+      success: false,
+      message: error.response?.data?.issue?.[0]?.diagnostics || error.message
+    };
+  }
+};
+
+/**
+ * Mengirim Instruksi Rencana Tindak Lanjut (ServiceRequest) ke SATUSEHAT
+ * @param {Object} data - Input data ServiceRequest (tipe rujukan / lab / radiologi)
+ * @returns {Promise<Object>} Response dengan ServiceRequest ID
+ */
+const postServiceRequest = async (data) => {
+  try {
+    const fhirClient = await createFhirClient();
+    const orgId = satusehatConfig.SATUSEHAT_ORG_ID;
+    
+    // Menerima parameter tambahan tipe request (default LAB, bisa ditimpa Rujukan/Radiologi)
+    const type = data.requestType || "LAB";
+    const payload = buildServiceRequestPayload(data, orgId, type);
+
+    console.log("[SATUSEHAT] Mengirim POST /ServiceRequest:", JSON.stringify(payload, null, 2));
+    const response = await fhirClient.post('/ServiceRequest', payload);
+
+    return {
+      success: true,
+      data: response.data,
+      serviceRequestId: response.data.id
+    };
+  } catch (error) {
+    console.error("[SATUSEHAT] Error creating ServiceRequest:", error.response?.data || error.message);
+    return {
+      success: false,
+      message: error.response?.data?.issue?.[0]?.diagnostics || error.message
+    };
+  }
+};
+
 module.exports = {
   generateAccessToken,
   createFhirClient,
   getPatientByNIK,
+  getPatientByNIKIbu,
   getPractitionerByNIK,
   createLocation,
   createPatient,
+  createRelatedPerson,
   createEncounter,
   updateEncounter,
   createObservation,
@@ -561,5 +772,10 @@ module.exports = {
   createAllergyIntolerance,
   searchKFA,
   postMedicationDispense,
+<<<<<<< HEAD
   createQuestionnaireResponse
+=======
+  postQuestionnaireResponse,
+  postServiceRequest
+>>>>>>> 251f5e81bda75763bd2204a8f5d79c81a92ee683
 };
